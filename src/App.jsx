@@ -20,6 +20,10 @@ const PLAYER_COLORS = [
   "#06A77D",
   "#D62828",
   "#118AB2",
+  "#E76F51",
+  "#457B9D",
+  "#B5179E",
+  "#7B6F00",
 ];
 
 const STORAGE_KEY = "yaniv-scorer-v2";
@@ -29,7 +33,7 @@ const emptyCurrent = () => ({
   numPlayers: 4,
   players: [],
   rounds: [],
-  nameInputs: Array(8)
+  nameInputs: Array(12)
     .fill(0)
     .map((_, i) => `P${i + 1}`),
   startedAt: null,
@@ -197,7 +201,7 @@ export default function App() {
         rounds: entry.rounds,
         nameInputs:
           entry.nameInputs ||
-          Array(8)
+          Array(12)
             .fill(0)
             .map((_, i) => entry.players[i] || `P${i + 1}`),
         startedAt: entry.startedAt, // 同じidを保ち、結果保存時に上書き更新
@@ -316,7 +320,7 @@ function SetupScreen({
       <div style={styles.card}>
         <label style={styles.label}>人数</label>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {[2, 3, 4, 5, 6, 7, 8].map((n) => (
+          {[2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12].map((n) => (
             <button
               key={n}
               onClick={() => setNumPlayers(n)}
