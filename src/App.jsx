@@ -26,10 +26,12 @@ import {
   buildCsv,
 } from "./logic.js";
 import { RulesSheet, RulesFab, recommendFor } from "./RulesPages.jsx";
+import { LiveBar, LiveSheet, useLivePublisher } from "./LiveUI.jsx";
+import { newRoomCode, normalizeCode, isValidCode } from "./live.js";
 
 // 参加順に割り当てる色。先頭から何色取っても互いの差（色差ΔE）が最大になるように並べてある
 // （2人:124 / 4人:73 / 7人:50 / 12人:33）
-const PLAYER_COLORS = [
+export const PLAYER_COLORS = [
   "#E03131", // 赤
   "#1C64F2", // 青
   "#14953F", // 緑
@@ -43,7 +45,7 @@ const PLAYER_COLORS = [
   "#6B7A1F", // オリーブ
   "#7BB31A", // ライム
 ];
-const POT_COLOR = "#8a8577";
+export const POT_COLOR = "#8a8577";
 const MAX_PLAYERS = 12;
 const STORAGE_KEY = "yaniv-scorer-v2";
 const TRASH_DAYS = 30; // 最近削除した項目の保持日数
@@ -95,6 +97,10 @@ function parseStore(parsed) {
       : [],
     lastSettings,
     lastBackupAt: parsed.lastBackupAt || null,
+    live:
+      parsed.live && isValidCode(parsed.live.code)
+        ? { code: parsed.live.code, on: !!parsed.live.on }
+        : { code: null, on: false },
   };
 }
 
@@ -153,6 +159,8 @@ export default function App() {
   const [history, setHistory] = useState(initial.history);
   const [trash, setTrash] = useState(initial.trash);
   const [lastBackupAt, setLastBackupAt] = useState(initial.lastBackupAt);
+  const [live, setLive] = useState(initial.live);
+  const [liveOpen, setLiveOpen] = useState(false);
   const [toast, setToast] = useState(null); // { text, undo }
   const toastTimer = useRef(null);
   const showToast = (t) => {
@@ -181,6 +189,16 @@ export default function App() {
     <>
       {screen}
       {!rulesTab && <RulesFab onOpen={() => setRulesTab("rules")} />}
+      {liveOpen && (
+        <LiveSheet
+          live={live}
+          status={liveStatus}
+          onStart={startLive}
+          onStop={stopLive}
+          onRenew={renewLive}
+          onClose={() => setLiveOpen(false)}
+        />
+      )}
       {toast && (
         <div style={styles.toast}>
           <span>{toast.text}</span>
@@ -211,9 +229,26 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ current, history, trash, lastSettings, lastBackupAt }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ current, history, trash, lastSettings, lastBackupAt, live }));
     } catch {}
-  }, [current, history, trash, lastSettings, lastBackupAt]);
+  }, [current, history, trash, lastSettings, lastBackupAt, live]);
+
+  // ===== ライブ共有 =====
+  const { status: liveStatus, sendEnd } = useLivePublisher(live, current);
+  const startLive = () => setLive({ code: live.code || newRoomCode(), on: true });
+  const stopLive = async () => {
+    if (!confirm("ライブ共有をやめる？見ている人の画面は「終了しました」になります")) return;
+    const code = live.code;
+    setLive({ code, on: false });
+    await sendEnd(code);
+  };
+  const renewLive = async () => {
+    if (!confirm("リンクを作り直す？今までのリンクやQRでは見られなくなります")) return;
+    const old = live.code;
+    setLive({ code: newRoomCode(), on: true });
+    if (old) await sendEnd(old);
+  };
+  const liveBar = <LiveBar live={live} status={liveStatus} onOpen={() => setLiveOpen(true)} />;
 
   // ===== バックアップ =====
   const exportBackup = async () => {
@@ -420,6 +455,7 @@ export default function App() {
         openRules={setRulesTab}
         knownNames={knownNames}
         lastMembers={lastMembers}
+        liveBar={live.on ? liveBar : null}
       />
     );
   }
@@ -432,6 +468,7 @@ export default function App() {
         onNewGame={newGame}
         openHistory={() => setView({ type: "history-list" })}
         historyCount={history.length}
+        liveBar={liveBar}
       />
     );
   }
@@ -444,12 +481,13 @@ export default function App() {
       goResult={goResult}
       onNewGame={newGame}
       knownNames={knownNames}
+      liveBar={liveBar}
     />
   );
 }
 
 // ============ 共通パーツ ============
-function Shell({ children }) {
+export function Shell({ children }) {
   return (
     <div style={{ minHeight: "100vh", padding: "calc(env(safe-area-inset-top, 0px) + 24px) 16px 96px" }}>
       <div style={{ maxWidth: 520, margin: "0 auto", display: "grid", gap: 14 }}>{children}</div>
@@ -457,7 +495,7 @@ function Shell({ children }) {
   );
 }
 
-function Header({ title, right }) {
+export function Header({ title, right }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
       <h1 style={styles.h1}>{title}</h1>
@@ -466,7 +504,7 @@ function Header({ title, right }) {
   );
 }
 
-function Dot({ idx, size = 10 }) {
+export function Dot({ idx, size = 10 }) {
   return (
     <span
       style={{
@@ -753,6 +791,7 @@ function SetupScreen({
   openRules,
   knownNames = [],
   lastMembers,
+  liveBar,
 }) {
   const { numPlayers, nameInputs } = current;
   const rec = recommendFor(numPlayers);
@@ -810,6 +849,24 @@ function SetupScreen({
           <span style={{ fontSize: 11, color: "#888", fontWeight: 600 }}>点数例・人数別</span>
         </button>
       </div>
+
+      {liveBar}
+
+      <button
+        onClick={() => {
+          const text = prompt("ライブのコードかリンクを入力");
+          if (text === null) return;
+          const code = normalizeCode(text);
+          if (!isValidCode(code)) {
+            alert("コードが正しくありません");
+            return;
+          }
+          window.location.href = `/?live=${code}`;
+        }}
+        style={{ ...styles.linkBtn, alignSelf: "start", justifySelf: "start", fontSize: 13 }}
+      >
+        共有されたライブを見る →
+      </button>
 
       <div style={styles.card}>
         {lastMembers && lastMembers.length >= 2 && (
@@ -929,7 +986,7 @@ const emptyInput = (n) => ({
   manualTransfers: [{ from: 0, to: 1, points: "" }],
 });
 
-function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, knownNames = [] }) {
+function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, knownNames = [], liveBar }) {
   const { players, rounds, settings, doubleLog } = game;
   const joinedAt = game.joinedAt || [];
   const roundNo = rounds.length + 1;
@@ -1064,6 +1121,8 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, 
           </>
         }
       />
+
+      {liveBar}
 
       {/* ラウンド数・ポット */}
       <div style={{ ...styles.card, display: "flex", alignItems: "stretch", padding: 0, overflow: "hidden" }}>
@@ -1569,7 +1628,7 @@ const MARKS = [
   { key: "mult", label: "倍率", color: "#F4A261", opacity: 0.22, test: (r) => (r.multiplier || 1) > 1 },
 ];
 
-function ScoreChart({ players, data, rounds = [], showPot, height, xDomain, yDomain, yTicks }) {
+export function ScoreChart({ players, data, rounds = [], showPot, height, xDomain, yDomain, yTicks }) {
   const [focus, setFocus] = useState([]);
   const [marks, setMarks] = useState({ back: true, draw: false, mult: false });
   const lastRound = data.length ? data[data.length - 1].round : 0;
@@ -2093,7 +2152,7 @@ function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, o
   );
 }
 
-function ResultScreen({ game, onBackToPlay, onNewGame, openHistory, historyCount }) {
+function ResultScreen({ game, onBackToPlay, onNewGame, openHistory, historyCount, liveBar }) {
   return (
     <Shell>
       <Header
@@ -2109,6 +2168,7 @@ function ResultScreen({ game, onBackToPlay, onNewGame, openHistory, historyCount
       <p style={styles.sub}>
         {game.rounds.length} rounds / {game.players.length} players · 履歴に保存済み
       </p>
+      {liveBar}
       <ResultView game={game} mode="current" onBackToPlay={onBackToPlay} onNewGame={onNewGame} />
     </Shell>
   );
@@ -2583,7 +2643,7 @@ function HistoryDetailScreen({ entry, onBack, onResume }) {
 }
 
 // ============ styles ============
-const styles = {
+export const styles = {
   h1: { fontSize: 32, fontWeight: 900, letterSpacing: "-0.02em", margin: 0 },
   h2: {
     fontSize: 13,
