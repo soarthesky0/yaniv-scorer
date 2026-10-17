@@ -6,8 +6,8 @@ import {
   YAxis,
   CartesianGrid,
   Tooltip,
-  Legend,
   ResponsiveContainer,
+  ReferenceArea,
 } from "recharts";
 import { toPng } from "html-to-image";
 import {
@@ -248,7 +248,7 @@ export default function App() {
 // ============ 共通パーツ ============
 function Shell({ children }) {
   return (
-    <div style={{ minHeight: "100vh", padding: "max(20px, env(safe-area-inset-top)) 16px 40px" }}>
+    <div style={{ minHeight: "100vh", padding: "calc(env(safe-area-inset-top, 0px) + 24px) 16px 40px" }}>
       <div style={{ maxWidth: 520, margin: "0 auto", display: "grid", gap: 14 }}>{children}</div>
     </div>
   );
@@ -256,9 +256,9 @@ function Shell({ children }) {
 
 function Header({ title, right }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
       <h1 style={styles.h1}>{title}</h1>
-      <div style={{ display: "flex", gap: 16 }}>{right}</div>
+      <div style={{ display: "flex", gap: 8 }}>{right}</div>
     </div>
   );
 }
@@ -289,7 +289,7 @@ function Segmented({ options, value, onChange, small }) {
             ...styles.chip,
             ...(small ? { padding: "6px 10px", fontSize: 13 } : {}),
             ...(value === o.value ? styles.chipActive : {}),
-            ...(o.activeColor && value === o.value ? { background: o.activeColor, borderColor: o.activeColor } : {}),
+            ...(o.activeColor && value === o.value ? { background: o.activeColor, boxShadow: `inset 0 0 0 1px ${o.activeColor}` } : {}),
           }}
         >
           {o.label}
@@ -488,7 +488,7 @@ function SettingsSheet({ settings, onChange, onClose }) {
       >
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
           <h2 style={{ ...styles.h2, margin: 0 }}>設定</h2>
-          <button onClick={onClose} style={styles.linkBtn}>
+          <button onClick={onClose} style={styles.headerBtn}>
             閉じる
           </button>
         </div>
@@ -507,7 +507,7 @@ function SetupScreen({ current, updateCurrent, updateSettings, startGame, histor
         title="YANIV"
         right={
           historyCount > 0 && (
-            <button onClick={openHistory} style={styles.linkBtn}>
+            <button onClick={openHistory} style={styles.headerBtn}>
               履歴 ({historyCount}) →
             </button>
           )
@@ -646,10 +646,10 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame }
         title="YANIV"
         right={
           <>
-            <button onClick={() => setSettingsOpen(true)} style={styles.linkBtn}>
+            <button onClick={() => setSettingsOpen(true)} style={styles.headerBtn}>
               設定
             </button>
-            <button onClick={onNewGame} style={styles.linkBtn}>
+            <button onClick={onNewGame} style={styles.headerBtn}>
               新規ゲーム
             </button>
           </>
@@ -663,7 +663,7 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame }
           <div style={styles.bigNum}>{roundNo}</div>
           {nextDouble && (
             <div style={{ fontSize: 11, color: "#999" }}>
-              次の倍マッチ：{nextDouble === roundNo ? "このラウンド" : `R${nextDouble}`}
+              倍マッチ：{nextDouble === roundNo ? "今回" : `R${nextDouble}`}
             </div>
           )}
         </div>
@@ -729,7 +729,7 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame }
 
       {rounds.length > 0 && (
         <Collapsible title="推移" open={chartOpen} setOpen={setChartOpen}>
-          <ScoreChart players={players} data={cumulative.series} showPot={settings.potEnabled} height={240} />
+          <ScoreChart players={players} data={cumulative.series} rounds={rounds} showPot={settings.potEnabled} height={240} />
         </Collapsible>
       )}
 
@@ -1113,51 +1113,157 @@ function RoundLog({ rounds, players }) {
   );
 }
 
-function ScoreChart({ players, data, showPot, height, xDomain, yDomain, yTicks }) {
+const MARKS = [
+  { key: "back", label: "返し", color: "#E63946", opacity: 0.14, test: (r) => r.type === "back" },
+  { key: "draw", label: "流局", color: "#6b675c", opacity: 0.14, test: (r) => r.type === "draw" },
+  { key: "mult", label: "倍率", color: "#F4A261", opacity: 0.22, test: (r) => (r.multiplier || 1) > 1 },
+];
+
+function ScoreChart({ players, data, rounds = [], showPot, height, xDomain, yDomain, yTicks }) {
+  const [focus, setFocus] = useState([]);
+  const [marks, setMarks] = useState({ back: true, draw: false, mult: false });
+  const lastRound = data.length ? data[data.length - 1].round : 0;
+  const domain = xDomain || [0, Math.max(1, lastRound)];
+  const visibleRounds = rounds.slice(0, lastRound);
+  const availableMarks = MARKS.filter((m) => rounds.some(m.test));
+
+  const toggleFocus = (i) =>
+    setFocus((prev) => (prev.includes(i) ? prev.filter((x) => x !== i) : [...prev, i]));
+
+  // 返されたラウンドの宣言者の点を目立たせる
+  const backedAt = {};
+  visibleRounds.forEach((r, k) => {
+    if (r.type === "back") backedAt[`${k + 1}-${r.declarer}`] = true;
+  });
+  const makeDot = (i) => (props) => {
+    const { cx, cy, payload, key } = props;
+    if (cx == null || cy == null) return null;
+    const faded = focus.length > 0 && !focus.includes(i);
+    if (marks.back && backedAt[`${payload.round}-${i}`]) {
+      return (
+        <g key={key}>
+          <circle cx={cx} cy={cy} r={6} fill="#E63946" stroke="#fff" strokeWidth={2} opacity={faded ? 0.25 : 1} />
+        </g>
+      );
+    }
+    if (faded) return <g key={key} />;
+    return <circle key={key} cx={cx} cy={cy} r={2.5} fill="#fff" stroke={PLAYER_COLORS[i % PLAYER_COLORS.length]} strokeWidth={1.5} />;
+  };
+
   return (
-    <div style={{ width: "100%", height }}>
-      <ResponsiveContainer>
-        <LineChart data={data}>
-          <CartesianGrid stroke="#eee" />
-          <XAxis
-            dataKey="round"
-            stroke="#666"
-            fontSize={12}
-            {...(xDomain ? { type: "number", domain: xDomain, allowDecimals: false } : {})}
-          />
-          <YAxis
-            stroke="#666"
-            fontSize={12}
-            width={40}
-            allowDecimals={false}
-            {...(yDomain ? { domain: yDomain, ticks: yTicks } : {})}
-          />
-          <Tooltip />
-          <Legend wrapperStyle={{ fontSize: 12 }} />
-          {players.map((p, i) => (
-            <Line
+    <div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+        {players.map((p, i) => {
+          const on = focus.length === 0 || focus.includes(i);
+          return (
+            <button
               key={i}
-              type="monotone"
-              dataKey={p}
-              stroke={PLAYER_COLORS[i % PLAYER_COLORS.length]}
-              strokeWidth={2}
-              dot={{ r: 2.5 }}
-              isAnimationActive={false}
-            />
+              onClick={() => toggleFocus(i)}
+              style={{
+                ...styles.miniChip,
+                opacity: on ? 1 : 0.35,
+                ...(focus.includes(i) ? { boxShadow: "inset 0 0 0 1.5px #1a1a1a" } : {}),
+              }}
+            >
+              <Dot idx={i} size={8} />
+              {p}
+            </button>
+          );
+        })}
+        {focus.length > 0 && (
+          <button onClick={() => setFocus([])} style={{ ...styles.miniChip, color: "#666" }}>
+            全員表示
+          </button>
+        )}
+      </div>
+
+      {availableMarks.length > 0 && (
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginBottom: 8 }}>
+          <span style={{ fontSize: 11, color: "#999", fontWeight: 700 }}>色付け</span>
+          {availableMarks.map((m) => (
+            <button
+              key={m.key}
+              onClick={() => setMarks((prev) => ({ ...prev, [m.key]: !prev[m.key] }))}
+              style={{
+                ...styles.miniChip,
+                ...(marks[m.key]
+                  ? { background: m.color, color: "#fff", boxShadow: `inset 0 0 0 1px ${m.color}` }
+                  : {}),
+              }}
+            >
+              {m.label}
+            </button>
           ))}
-          {showPot && (
-            <Line
-              type="stepAfter"
-              dataKey="ポット"
-              stroke={POT_COLOR}
-              strokeDasharray="4 3"
-              strokeWidth={1.5}
-              dot={false}
-              isAnimationActive={false}
+        </div>
+      )}
+
+      <div style={{ width: "100%", height }}>
+        <ResponsiveContainer>
+          <LineChart data={data} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
+            <CartesianGrid stroke="#eee" />
+            {MARKS.filter((m) => marks[m.key]).flatMap((m) =>
+              visibleRounds.map((r, k) =>
+                m.test(r) ? (
+                  <ReferenceArea
+                    key={`${m.key}-${k}`}
+                    x1={k}
+                    x2={k + 1}
+                    fill={m.color}
+                    fillOpacity={m.opacity}
+                    stroke="none"
+                    ifOverflow="hidden"
+                  />
+                ) : null
+              )
+            )}
+            <XAxis dataKey="round" stroke="#666" fontSize={12} type="number" domain={domain} allowDecimals={false} />
+            <YAxis
+              stroke="#666"
+              fontSize={12}
+              width={40}
+              allowDecimals={false}
+              {...(yDomain ? { domain: yDomain, ticks: yTicks } : {})}
             />
-          )}
-        </LineChart>
-      </ResponsiveContainer>
+            <Tooltip />
+            {players.map((p, i) => {
+              const faded = focus.length > 0 && !focus.includes(i);
+              return (
+                <Line
+                  key={i}
+                  type="monotone"
+                  dataKey={p}
+                  stroke={PLAYER_COLORS[i % PLAYER_COLORS.length]}
+                  strokeWidth={faded ? 1.5 : focus.length > 0 ? 3 : 2}
+                  strokeOpacity={faded ? 0.15 : 1}
+                  dot={makeDot(i)}
+                  activeDot={faded ? false : { r: 4 }}
+                  isAnimationActive={false}
+                />
+              );
+            })}
+            {showPot && (
+              <Line
+                type="stepAfter"
+                dataKey="ポット"
+                stroke={POT_COLOR}
+                strokeDasharray="4 3"
+                strokeWidth={1.5}
+                dot={false}
+                isAnimationActive={false}
+              />
+            )}
+          </LineChart>
+        </ResponsiveContainer>
+      </div>
+      <div style={{ fontSize: 11, color: "#999", marginTop: 4, display: "flex", gap: 12, flexWrap: "wrap" }}>
+        {showPot && <span>- - - ポット</span>}
+        {marks.back && rounds.some((r) => r.type === "back") && (
+          <span>
+            <span style={{ color: "#E63946" }}>●</span> 返された宣言者
+          </span>
+        )}
+        <span>名前をタップで絞り込み</span>
+      </div>
     </div>
   );
 }
@@ -1417,6 +1523,7 @@ function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, o
           <ScoreChart
             players={players}
             data={visibleSeries}
+            rounds={rounds}
             showPot={showPot}
             height={280}
             xDomain={[0, cumulative.series.length - 1]}
@@ -1491,7 +1598,7 @@ function ResultScreen({ game, onBackToPlay, onNewGame, openHistory, historyCount
         title="RESULT"
         right={
           historyCount > 0 && (
-            <button onClick={openHistory} style={styles.linkBtn}>
+            <button onClick={openHistory} style={styles.headerBtn}>
               履歴 ({historyCount}) →
             </button>
           )
@@ -1512,7 +1619,7 @@ function HistoryListScreen({ history, onBack, onSelect, onDelete }) {
       <Header
         title="HISTORY"
         right={
-          <button onClick={onBack} style={styles.linkBtn}>
+          <button onClick={onBack} style={styles.headerBtn}>
             ← 戻る
           </button>
         }
@@ -1563,7 +1670,7 @@ function HistoryDetailScreen({ entry, onBack, onResume }) {
       <Header
         title="RESULT"
         right={
-          <button onClick={onBack} style={styles.linkBtn}>
+          <button onClick={onBack} style={styles.headerBtn}>
             ← 履歴
           </button>
         }
@@ -1623,27 +1730,30 @@ const styles = {
   numBtn: {
     width: 44,
     height: 44,
-    border: "1px solid #d4d0c4",
+    border: "none",
+    boxShadow: "inset 0 0 0 1px #d4d0c4",
     borderRadius: 4,
     background: "#fff",
     fontSize: 16,
     fontWeight: 600,
     color: "#1a1a1a",
   },
-  numBtnActive: { background: "#1a1a1a", color: "#fff", borderColor: "#1a1a1a" },
+  numBtnActive: { background: "#1a1a1a", color: "#fff", boxShadow: "inset 0 0 0 1px #1a1a1a" },
   chip: {
     padding: "8px 12px",
-    border: "1px solid #d4d0c4",
+    border: "none",
+    boxShadow: "inset 0 0 0 1px #d4d0c4",
     borderRadius: 20,
     background: "#fff",
     fontSize: 14,
     fontWeight: 600,
     color: "#1a1a1a",
   },
-  chipActive: { background: "#1a1a1a", color: "#fff", borderColor: "#1a1a1a" },
+  chipActive: { background: "#1a1a1a", color: "#fff", boxShadow: "inset 0 0 0 1px #1a1a1a" },
   typeBtn: {
     padding: "14px 2px",
-    border: "1px solid #d4d0c4",
+    border: "none",
+    boxShadow: "inset 0 0 0 1px #d4d0c4",
     borderRadius: 6,
     background: "#fff",
     fontSize: 13,
@@ -1651,11 +1761,12 @@ const styles = {
     whiteSpace: "nowrap",
     color: "#1a1a1a",
   },
-  typeBtnActive: { background: "#1a1a1a", color: "#fff", borderColor: "#1a1a1a" },
+  typeBtnActive: { background: "#1a1a1a", color: "#fff", boxShadow: "inset 0 0 0 1px #1a1a1a" },
   stepBtn: {
     width: 40,
     height: 40,
-    border: "1px solid #d4d0c4",
+    border: "none",
+    boxShadow: "inset 0 0 0 1px #d4d0c4",
     borderRadius: 20,
     background: "#fff",
     fontSize: 20,
@@ -1695,13 +1806,38 @@ const styles = {
   iconBtn: {
     width: 32,
     height: 32,
-    border: "1px solid #d4d0c4",
+    border: "none",
+    boxShadow: "inset 0 0 0 1px #d4d0c4",
     background: "#fff",
     borderRadius: 4,
     fontSize: 16,
     color: "#999",
   },
-  linkBtn: { background: "none", border: "none", color: "#666", fontSize: 13, fontWeight: 600, padding: 0 },
+  linkBtn: { background: "none", border: "none", color: "#666", fontSize: 14, fontWeight: 600, padding: "6px 0" },
+  headerBtn: {
+    background: "#fff",
+    border: "none",
+    boxShadow: "inset 0 0 0 1px #d4d0c4",
+    color: "#1a1a1a",
+    fontSize: 15,
+    fontWeight: 700,
+    padding: "10px 14px",
+    borderRadius: 20,
+    minHeight: 42,
+  },
+  miniChip: {
+    display: "flex",
+    alignItems: "center",
+    gap: 5,
+    padding: "5px 9px",
+    border: "none",
+    boxShadow: "inset 0 0 0 1px #d4d0c4",
+    borderRadius: 14,
+    background: "#fff",
+    fontSize: 12,
+    fontWeight: 600,
+    color: "#1a1a1a",
+  },
   rank: {
     width: 28,
     height: 28,
