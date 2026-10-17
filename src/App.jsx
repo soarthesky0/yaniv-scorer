@@ -9,7 +9,7 @@ import {
   ResponsiveContainer,
   ReferenceArea,
 } from "recharts";
-import { toPng } from "html-to-image";
+import { toBlob } from "html-to-image";
 import {
   DEFAULT_SETTINGS,
   ROUND_TYPE_LABEL,
@@ -58,6 +58,7 @@ const emptyCurrent = (settings) => ({
   startedAt: null,
   settings: { ...DEFAULT_SETTINGS, ...(settings || {}) },
   doubleLog: {},
+  joinedAt: [],
 });
 
 function normalizeGame(g) {
@@ -67,6 +68,7 @@ function normalizeGame(g) {
     rounds: normalizeRounds(g.rounds, players.length),
     settings: { ...DEFAULT_SETTINGS, ...(g.settings || {}) },
     doubleLog: g.doubleLog || {},
+    joinedAt: players.map((_, i) => (g.joinedAt && g.joinedAt[i]) || 0),
   };
 }
 
@@ -126,6 +128,7 @@ export default function App() {
       players: names,
       rounds: [],
       doubleLog: {},
+      joinedAt: names.map(() => 0),
       phase: "play",
       startedAt: new Date().toISOString(),
     });
@@ -133,7 +136,7 @@ export default function App() {
 
   const goResult = () => {
     if (current.rounds.length === 0) return;
-    const cum = computeCumulative(current.players, current.rounds);
+    const cum = computeCumulative(current.players, current.rounds, current.joinedAt);
     const ranked = computeRanked(current.players, cum.totals);
     const entry = {
       id: current.startedAt || new Date().toISOString(),
@@ -145,6 +148,7 @@ export default function App() {
       nameInputs: current.nameInputs,
       settings: current.settings,
       doubleLog: current.doubleLog,
+      joinedAt: current.joinedAt,
       winner: ranked[0]?.name || "",
       winnerScore: ranked[0]?.score ?? 0,
     };
@@ -183,6 +187,7 @@ export default function App() {
       startedAt: entry.startedAt,
       settings: { ...DEFAULT_SETTINGS, ...(entry.settings || {}) },
       doubleLog: entry.doubleLog || {},
+      joinedAt: entry.players.map((_, i) => (entry.joinedAt && entry.joinedAt[i]) || 0),
     });
     setView({ type: "main" });
   };
@@ -571,10 +576,61 @@ const emptyInput = (n) => ({
 
 function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame }) {
   const { players, rounds, settings, doubleLog } = game;
+  const joinedAt = game.joinedAt || [];
   const roundNo = rounds.length + 1;
   const pot = currentPot(rounds);
-  const cumulative = useMemo(() => computeCumulative(players, rounds), [players, rounds]);
+  const cumulative = useMemo(() => computeCumulative(players, rounds, joinedAt), [players, rounds, joinedAt]);
   const [input, setInput] = useState(() => emptyInput(players.length));
+  const [joinOpen, setJoinOpen] = useState(false);
+  const [joinName, setJoinName] = useState("");
+
+  // 人数が変わったら流局入力の欄を合わせる
+  useEffect(() => {
+    setInput((prev) =>
+      prev.hands.length === players.length
+        ? prev
+        : {
+            ...prev,
+            hands: players.map((_, i) => prev.hands[i] ?? ""),
+            declarer: prev.declarer !== null && prev.declarer >= players.length ? null : prev.declarer,
+            targets: prev.targets.filter((t) => t < players.length),
+          }
+    );
+  }, [players.length]);
+
+  const addPlayer = () => {
+    const name = joinName.trim();
+    if (!name) return;
+    if (players.includes(name)) {
+      alert("同じ名前のプレイヤーがいます");
+      return;
+    }
+    if (players.length >= MAX_PLAYERS) return;
+    updateCurrent((prev) => {
+      const nameInputs = [...prev.nameInputs];
+      nameInputs[prev.players.length] = name;
+      return {
+        players: [...prev.players, name],
+        joinedAt: [...prev.players.map((_, i) => (prev.joinedAt || [])[i] || 0), prev.rounds.length],
+        numPlayers: prev.players.length + 1,
+        nameInputs,
+      };
+    });
+    setJoinName("");
+    setJoinOpen(false);
+  };
+
+  // 参加してからまだラウンドが進んでいない最後のプレイヤーは取り消せる
+  const lastIdx = players.length - 1;
+  const canRemoveLast = players.length > 2 && (joinedAt[lastIdx] || 0) > 0 && joinedAt[lastIdx] === rounds.length;
+  const removeLast = () => {
+    if (!confirm(`${players[lastIdx]}の参加を取り消す？`)) return;
+    updateCurrent((prev) => ({
+      players: prev.players.slice(0, -1),
+      joinedAt: (prev.joinedAt || []).slice(0, prev.players.length - 1),
+      numPlayers: prev.players.length - 1,
+    }));
+  };
   const [chartOpen, setChartOpen] = useState(true);
   const [statsOpen, setStatsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -630,8 +686,10 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame }
     if (rounds.length === 0) return;
     if (!confirm(`ラウンド${rounds.length}を取り消す？`)) return;
     const last = rounds[rounds.length - 1];
+    const newLen = rounds.length - 1;
     updateCurrent({
       rounds: rounds.slice(0, -1),
+      joinedAt: joinedAt.map((j) => Math.min(j || 0, newLen)),
       ...(last.doubleLogBefore ? { doubleLog: last.doubleLogBefore } : {}),
     });
   };
@@ -716,11 +774,47 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame }
               <span style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <Dot idx={i} />
                 {p}
+                {(joinedAt[i] || 0) > 0 && (
+                  <span style={{ fontSize: 11, color: "#999" }}>R{joinedAt[i] + 1}から参加</span>
+                )}
+                {i === lastIdx && canRemoveLast && (
+                  <button onClick={removeLast} style={{ ...styles.linkBtn, fontSize: 12, color: "#c0392b" }}>
+                    取消
+                  </button>
+                )}
               </span>
               <span style={{ fontFamily: "monospace", fontSize: 16 }}>{cumulative.totals[i]}</span>
             </div>
           ))}
         </div>
+        {players.length < MAX_PLAYERS &&
+          (joinOpen ? (
+            <div style={{ marginTop: 14, borderTop: "1px solid #eee", paddingTop: 14 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  value={joinName}
+                  autoFocus
+                  onChange={(e) => setJoinName(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && addPlayer()}
+                  placeholder="参加する人の名前"
+                  style={styles.input}
+                />
+                <button onClick={addPlayer} style={{ ...styles.headerBtn, background: "#1a1a1a", color: "#fff" }}>
+                  追加
+                </button>
+              </div>
+              <div style={{ fontSize: 11, color: "#999", marginTop: 6 }}>
+                R{roundNo}から参加、持ち点0で始まります
+              </div>
+              <button onClick={() => setJoinOpen(false)} style={{ ...styles.linkBtn, marginTop: 4 }}>
+                やめる
+              </button>
+            </div>
+          ) : (
+            <button onClick={() => setJoinOpen(true)} style={{ ...styles.secondary, marginTop: 14 }}>
+              ＋ 途中参加を追加
+            </button>
+          ))}
       </div>
 
       {rounds.length > 0 && (
@@ -1346,7 +1440,7 @@ function niceStep(x) {
 
 // ============ CSV ============
 async function exportCsv(game) {
-  const csv = "﻿" + buildCsv(game.players, game.rounds);
+  const csv = "﻿" + buildCsv(game.players, game.rounds, game.joinedAt || []);
   const d = new Date(game.startedAt || Date.now());
   const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(
     2,
@@ -1376,7 +1470,10 @@ async function exportCsv(game) {
 // ============ Result（現在ゲーム・履歴詳細の共通部分） ============
 function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, onResume }) {
   const { players, rounds, settings } = game;
-  const cumulative = useMemo(() => computeCumulative(players, rounds), [players, rounds]);
+  const joinedAt = game.joinedAt || [];
+  const cumulative = useMemo(() => computeCumulative(players, rounds, joinedAt), [players, rounds, joinedAt]);
+  const [shot, setShot] = useState(null); // { url, file }
+  const [shotBusy, setShotBusy] = useState(false);
   const ranked = useMemo(() => computeRanked(players, cumulative.totals), [players, cumulative.totals]);
   const settlement = useMemo(() => computeSettlement(cumulative.totals), [cumulative.totals]);
   const pot = currentPot(rounds);
@@ -1410,7 +1507,9 @@ function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, o
   useEffect(() => () => clearInterval(replayTimerRef.current), []);
 
   const visibleSeries = cumulative.series.slice(0, replayIdx + 1);
-  const allValues = cumulative.series.flatMap((s) => [...players.map((p) => s[p]), ...(showPot ? [s["ポット"]] : [])]);
+  const allValues = cumulative.series
+    .flatMap((s) => [...players.map((p) => s[p]), ...(showPot ? [s["ポット"]] : [])])
+    .filter((v) => typeof v === "number");
   const rawMin = Math.min(0, ...allValues);
   const rawMax = Math.max(0, ...allValues);
   const step = niceStep((rawMax - rawMin) / 5);
@@ -1419,17 +1518,52 @@ function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, o
   const yTicks = [];
   for (let v = yMin; v <= yMax; v += step) yTicks.push(v);
 
+  // iPhoneのホーム画面アプリではダウンロードが効かないため、
+  // 画像を作ってプレビューを出し、そこから共有シートで保存する
   const saveScreenshot = async () => {
-    if (!shareRef.current) return;
+    if (!shareRef.current || shotBusy) return;
+    setShotBusy(true);
+    const opts = {
+      backgroundColor: "#f4f1ea",
+      pixelRatio: 2,
+      cacheBust: true,
+    };
     try {
-      const dataUrl = await toPng(shareRef.current, { backgroundColor: "#f4f1ea", pixelRatio: 2 });
-      const link = document.createElement("a");
-      link.download = `yaniv-result-${Date.now()}.png`;
-      link.href = dataUrl;
-      link.click();
+      // Safariは1回目の描画が欠けることがあるので、2回描画して2回目を使う
+      await toBlob(shareRef.current, opts).catch(() => null);
+      const blob = await toBlob(shareRef.current, opts);
+      if (!blob) throw new Error("empty");
+      const name = `yaniv-result-${Date.now()}.png`;
+      const file = new File([blob], name, { type: "image/png" });
+      setShot({ url: URL.createObjectURL(blob), file, name });
     } catch {
-      alert("保存に失敗しました。ブラウザの設定を確認してください。");
+      alert("画像の作成に失敗しました。もう一度試してください。");
+    } finally {
+      setShotBusy(false);
     }
+  };
+
+  const closeShot = () => {
+    if (shot) URL.revokeObjectURL(shot.url);
+    setShot(null);
+  };
+
+  const shareShot = async () => {
+    if (!shot) return;
+    try {
+      if (navigator.canShare && navigator.canShare({ files: [shot.file] })) {
+        await navigator.share({ files: [shot.file] });
+        return;
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+    }
+    const a = document.createElement("a");
+    a.href = shot.url;
+    a.download = shot.name;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   };
 
   return (
@@ -1556,10 +1690,10 @@ function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, o
           スライダーで任意の時点に / 画面録画はコントロールセンターから
         </p>
 
-        <button onClick={saveScreenshot} style={styles.primary}>
-          結果を画像で保存
+        <button onClick={saveScreenshot} style={{ ...styles.primary, opacity: shotBusy ? 0.5 : 1 }}>
+          {shotBusy ? "画像を作成中…" : "結果を画像で保存"}
         </button>
-        <button onClick={() => exportCsv(game)} style={styles.secondary}>
+        <button onClick={() => exportCsv({ ...game, joinedAt })} style={styles.secondary}>
           ラウンド記録をCSVで出力
         </button>
         {mode === "current" && (
@@ -1583,6 +1717,40 @@ function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, o
           </>
         )}
       </div>
+      {shot && (
+        <div
+          onClick={closeShot}
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(20,20,20,0.92)",
+            zIndex: 60,
+            display: "flex",
+            flexDirection: "column",
+            padding: "calc(env(safe-area-inset-top, 0px) + 16px) 16px calc(env(safe-area-inset-bottom, 0px) + 16px)",
+            gap: 12,
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{ flex: 1, minHeight: 0, overflowY: "auto", borderRadius: 8, background: "#f4f1ea" }}
+          >
+            <img src={shot.url} alt="結果" style={{ width: "100%", display: "block" }} />
+          </div>
+          <div onClick={(e) => e.stopPropagation()} style={{ display: "grid", gap: 8 }}>
+            <button onClick={shareShot} style={{ ...styles.primary, background: "#fff", color: "#1a1a1a" }}>
+              共有・保存（「画像を保存」を選択）
+            </button>
+            <div style={{ color: "#ddd", fontSize: 12, textAlign: "center" }}>画像を長押しでも保存できます</div>
+            <button
+              onClick={closeShot}
+              style={{ ...styles.secondary, background: "transparent", color: "#fff", boxShadow: "inset 0 0 0 1px #fff", border: "none" }}
+            >
+              閉じる
+            </button>
+          </div>
+        </div>
+      )}
     </>
   );
 }

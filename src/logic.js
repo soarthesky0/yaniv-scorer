@@ -125,16 +125,22 @@ export function currentPot(rounds) {
   return rounds.length ? rounds[rounds.length - 1].potAfter || 0 : 0;
 }
 
-export function computeCumulative(players, rounds) {
+// joinedAt[i]: そのプレイヤーが参加した時点で完了していたラウンド数（最初からなら0）
+export function computeCumulative(players, rounds, joinedAt = []) {
   const totals = zeros(players.length);
-  const series = [Object.fromEntries([["round", 0], ["ポット", 0], ...players.map((p) => [p, 0])])];
+  const joined = (i, k) => k >= (joinedAt[i] || 0);
+  const series = [
+    Object.fromEntries([["round", 0], ["ポット", 0], ...players.map((p, i) => [p, joined(i, 0) ? 0 : null])]),
+  ];
   rounds.forEach((round, rIdx) => {
-    round.deltas.forEach((d, i) => (totals[i] += d));
+    round.deltas.forEach((d, i) => {
+      if (i < totals.length) totals[i] += d;
+    });
     series.push(
       Object.fromEntries([
         ["round", rIdx + 1],
         ["ポット", round.potAfter || 0],
-        ...players.map((p, i) => [p, totals[i]]),
+        ...players.map((p, i) => [p, joined(i, rIdx + 1) ? totals[i] : null]),
       ])
     );
   });
@@ -247,7 +253,7 @@ export function describeRound(r, players) {
 }
 
 // CSV出力
-export function buildCsv(players, rounds) {
+export function buildCsv(players, rounds, joinedAt = []) {
   const esc = (v) => {
     const s = v === null || v === undefined ? "" : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
@@ -270,7 +276,12 @@ export function buildCsv(players, rounds) {
   const lines = [header.map(esc).join(",")];
   const totals = zeros(players.length);
   rounds.forEach((r, idx) => {
-    r.deltas.forEach((d, i) => (totals[i] += d));
+    r.deltas.forEach((d, i) => {
+      if (i < totals.length) totals[i] += d;
+    });
+    const inGame = (i) => idx + 1 > (joinedAt[i] || 0);
+    const deltas = players.map((_, i) => (inGame(i) ? r.deltas[i] || 0 : ""));
+    const totalsOut = players.map((_, i) => (inGame(i) ? totals[i] : ""));
     const hands = zeros(players.length).map(() => "");
     if (r.type === "draw") (r.hands || []).forEach((h, i) => (hands[i] = h));
     if (r.type === "success" || r.type === "back") {
@@ -291,8 +302,8 @@ export function buildCsv(players, rounds) {
         r.potAfter || 0,
         moves.join(" / "),
         ...hands,
-        ...r.deltas,
-        ...totals,
+        ...deltas,
+        ...totalsOut,
       ]
         .map(esc)
         .join(",")
