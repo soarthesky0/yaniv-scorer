@@ -44,6 +44,8 @@ const PLAYER_COLORS = [
 const POT_COLOR = "#8a8577";
 const MAX_PLAYERS = 12;
 const STORAGE_KEY = "yaniv-scorer-v2";
+const TRASH_DAYS = 30; // 最近削除した項目の保持日数
+const DAY_MS = 86400000;
 
 const defaultNames = () =>
   Array(MAX_PLAYERS)
@@ -76,7 +78,7 @@ function normalizeGame(g) {
 function loadStore() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { current: emptyCurrent(), history: [], lastSettings: DEFAULT_SETTINGS };
+    if (!raw) return { current: emptyCurrent(), history: [], trash: [], lastSettings: DEFAULT_SETTINGS };
     const parsed = JSON.parse(raw);
     const lastSettings = { ...DEFAULT_SETTINGS, ...(parsed.lastSettings || {}) };
     const cur = { ...emptyCurrent(lastSettings), ...(parsed.current || {}) };
@@ -86,10 +88,16 @@ function loadStore() {
     return {
       current: normalizeGame(cur),
       history: Array.isArray(parsed.history) ? parsed.history.map(normalizeGame) : [],
+      // 保持期間を過ぎたものはここで消える
+      trash: Array.isArray(parsed.trash)
+        ? parsed.trash
+            .filter((t) => Date.now() - new Date(t.deletedAt).getTime() < TRASH_DAYS * DAY_MS)
+            .map((t) => ({ ...normalizeGame(t), deletedAt: t.deletedAt }))
+        : [],
       lastSettings,
     };
   } catch {
-    return { current: emptyCurrent(), history: [], lastSettings: DEFAULT_SETTINGS };
+    return { current: emptyCurrent(), history: [], trash: [], lastSettings: DEFAULT_SETTINGS };
   }
 }
 
@@ -104,6 +112,14 @@ export default function App() {
   const [initial] = useState(loadStore);
   const [current, setCurrent] = useState(initial.current);
   const [history, setHistory] = useState(initial.history);
+  const [trash, setTrash] = useState(initial.trash);
+  const [toast, setToast] = useState(null); // { text, undo }
+  const toastTimer = useRef(null);
+  const showToast = (t) => {
+    clearTimeout(toastTimer.current);
+    setToast(t);
+    toastTimer.current = setTimeout(() => setToast(null), 5000);
+  };
   const [lastSettings, setLastSettings] = useState(initial.lastSettings);
   const [view, setView] = useState({ type: "main" });
   const [rulesTab, setRulesTab] = useState(null); // null | "rules" | "quick"
@@ -112,6 +128,22 @@ export default function App() {
     <>
       {screen}
       {!rulesTab && <RulesFab onOpen={() => setRulesTab("rules")} />}
+      {toast && (
+        <div style={styles.toast}>
+          <span>{toast.text}</span>
+          {toast.undo && (
+            <button
+              onClick={() => {
+                toast.undo();
+                setToast(null);
+              }}
+              style={{ background: "none", border: "none", color: "#F4A261", fontSize: 15, fontWeight: 800, padding: "4px 0" }}
+            >
+              元に戻す
+            </button>
+          )}
+        </div>
+      )}
       {rulesTab && (
         <RulesSheet
           tab={rulesTab}
@@ -126,9 +158,9 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ current, history, lastSettings }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ current, history, trash, lastSettings }));
     } catch {}
-  }, [current, history, lastSettings]);
+  }, [current, history, trash, lastSettings]);
 
   const updateCurrent = useCallback((patch) => {
     setCurrent((prev) => ({ ...prev, ...(typeof patch === "function" ? patch(prev) : patch) }));
@@ -186,9 +218,34 @@ export default function App() {
     return true;
   };
 
+  // 削除はゴミ箱へ移すだけ（30日間は復元できる）
   const deleteHistory = (id) => {
-    if (!confirm("この試合の記録を削除する？")) return;
+    const entry = history.find((h) => h.id === id);
+    if (!entry) return;
+    const removed = { ...entry, deletedAt: new Date().toISOString() };
     setHistory((prev) => prev.filter((h) => h.id !== id));
+    setTrash((prev) => [removed, ...prev.filter((t) => t.id !== id)]);
+    showToast({ text: "最近削除した項目に移しました", undo: () => restoreHistory(id) });
+  };
+
+  const restoreHistory = (id) => {
+    setTrash((prevTrash) => {
+      const entry = prevTrash.find((t) => t.id === id);
+      if (entry) {
+        const { deletedAt, ...rest } = entry;
+        setHistory((prev) =>
+          [rest, ...prev.filter((h) => h.id !== id)].sort((a, b) =>
+            (b.finishedAt || b.startedAt).localeCompare(a.finishedAt || a.startedAt)
+          )
+        );
+      }
+      return prevTrash.filter((t) => t.id !== id);
+    });
+  };
+
+  const purgeTrash = (id) => {
+    if (!confirm(id ? "この試合を完全に削除する？元に戻せません" : "すべて完全に削除する？元に戻せません")) return;
+    setTrash((prev) => (id ? prev.filter((t) => t.id !== id) : []));
   };
 
   const resumeGame = (id) => {
@@ -211,6 +268,20 @@ export default function App() {
     setView({ type: "main" });
   };
 
+  if (view.type === "trash") {
+    return wrap(
+      <TrashScreen
+        trash={trash}
+        onBack={() => setView({ type: "history-list" })}
+        onRestore={(id) => {
+          restoreHistory(id);
+          showToast({ text: "履歴に戻しました" });
+        }}
+        onPurge={purgeTrash}
+      />
+    );
+  }
+
   if (view.type === "history-list" || (view.type === "history-detail" && !history.find((h) => h.id === view.id))) {
     return wrap(
       <HistoryListScreen
@@ -218,6 +289,8 @@ export default function App() {
         onBack={() => setView({ type: "main" })}
         onSelect={(id) => setView({ type: "history-detail", id })}
         onDelete={deleteHistory}
+        trashCount={trash.length}
+        openTrash={() => setView({ type: "trash" })}
         onNewGame={() => {
           if (newGame()) setView({ type: "main" });
         }}
@@ -1901,7 +1974,7 @@ function Sparkline({ players, series, width = 112, height = 56 }) {
 
 const MEDAL = ["#C9A227", "#9AA0A6", "#B87333"];
 
-function HistoryCard({ h, onSelect, onDelete }) {
+function HistoryCard({ h, onSelect, onDelete, footer }) {
   const joinedAt = h.joinedAt || [];
   const cum = useMemo(() => computeCumulative(h.players, h.rounds, joinedAt), [h]);
   const ranked = computeRanked(h.players, cum.totals);
@@ -1918,8 +1991,8 @@ function HistoryCard({ h, onSelect, onDelete }) {
 
   return (
     <div
-      onClick={() => onSelect(h.id)}
-      style={{ ...styles.card, padding: 0, overflow: "hidden", cursor: "pointer", position: "relative" }}
+      onClick={onSelect ? () => onSelect(h.id) : undefined}
+      style={{ ...styles.card, padding: 0, overflow: "hidden", cursor: onSelect ? "pointer" : "default", position: "relative" }}
     >
       <div style={{ display: "flex", gap: 14, padding: "14px 16px 12px", alignItems: "stretch" }}>
         <div style={{ flex: 1, minWidth: 0 }}>
@@ -1983,7 +2056,7 @@ function HistoryCard({ h, onSelect, onDelete }) {
         </div>
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "space-between" }}>
           <Sparkline players={h.players} series={cum.series} />
-          <span style={{ fontSize: 12, color: "#999", fontWeight: 700 }}>詳細 →</span>
+          {onSelect && <span style={{ fontSize: 12, color: "#999", fontWeight: 700 }}>詳細 →</span>}
         </div>
       </div>
       {(
@@ -2015,22 +2088,28 @@ function HistoryCard({ h, onSelect, onDelete }) {
               {c.label}
             </span>
           ))}
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              onDelete(h.id);
-            }}
-            style={{ ...styles.linkBtn, marginLeft: "auto", fontSize: 12, color: "#c0392b", padding: "2px 0" }}
-          >
-            削除
-          </button>
+          {footer ? (
+            <span style={{ marginLeft: "auto", display: "flex", gap: 14 }} onClick={(e) => e.stopPropagation()}>
+              {footer}
+            </span>
+          ) : (
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                onDelete(h.id);
+              }}
+              style={{ ...styles.linkBtn, marginLeft: "auto", fontSize: 12, color: "#c0392b", padding: "2px 0" }}
+            >
+              削除
+            </button>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function HistoryListScreen({ history, onBack, onSelect, onDelete, onNewGame }) {
+function HistoryListScreen({ history, onBack, onSelect, onDelete, onNewGame, trashCount, openTrash }) {
   // 通算成績（名前ごと）
   const summary = useMemo(() => {
     const stats = {};
@@ -2148,10 +2227,76 @@ function HistoryListScreen({ history, onBack, onSelect, onDelete, onNewGame }) {
         </>
       )}
 
+      {trashCount > 0 && (
+        <button onClick={openTrash} style={{ ...styles.homeLink, flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 6 }}>
+          <span>
+            <span style={{ display: "block", fontSize: 15, fontWeight: 800 }}>最近削除した項目</span>
+            <span style={{ fontSize: 11, color: "#999", fontWeight: 600 }}>{TRASH_DAYS}日間は復元できます</span>
+          </span>
+          <span style={{ fontSize: 14, fontWeight: 800, color: "#666" }}>{trashCount}件 →</span>
+        </button>
+      )}
+
       <button onClick={onNewGame} style={styles.newGameFab} aria-label="新規ゲーム">
         <span style={{ fontSize: 26, lineHeight: 1, fontWeight: 300 }}>＋</span>
         <span style={{ fontSize: 10, fontWeight: 800, marginTop: 1 }}>新規</span>
       </button>
+    </Shell>
+  );
+}
+
+function TrashScreen({ trash, onBack, onRestore, onPurge }) {
+  const daysLeft = (t) => Math.max(1, Math.ceil((new Date(t.deletedAt).getTime() + TRASH_DAYS * DAY_MS - Date.now()) / DAY_MS));
+  return (
+    <Shell>
+      <Header
+        title="TRASH"
+        right={
+          <button onClick={onBack} style={styles.headerBtn}>
+            ← 履歴
+          </button>
+        }
+      />
+      <p style={{ ...styles.sub, textTransform: "none", letterSpacing: "0.02em" }}>
+        最近削除した項目 · 削除から{TRASH_DAYS}日後に完全に削除されます
+      </p>
+      {trash.length === 0 ? (
+        <div style={{ ...styles.card, textAlign: "center", padding: "40px 20px", color: "#999" }}>
+          最近削除した項目はありません
+        </div>
+      ) : (
+        <>
+          {trash.map((t) => (
+            <div key={t.id} style={{ display: "grid", gap: 6 }}>
+              <div style={{ fontSize: 12, color: "#999", fontWeight: 700, paddingLeft: 2 }}>
+                {formatDate(t.finishedAt || t.startedAt)}の試合 · あと{daysLeft(t)}日
+              </div>
+              <HistoryCard
+                h={t}
+                footer={
+                  <>
+                    <button
+                      onClick={() => onRestore(t.id)}
+                      style={{ ...styles.linkBtn, fontSize: 13, color: "#2A9D8F", fontWeight: 800, padding: "2px 0" }}
+                    >
+                      復元
+                    </button>
+                    <button
+                      onClick={() => onPurge(t.id)}
+                      style={{ ...styles.linkBtn, fontSize: 12, color: "#c0392b", padding: "2px 0" }}
+                    >
+                      完全に削除
+                    </button>
+                  </>
+                }
+              />
+            </div>
+          ))}
+          <button onClick={() => onPurge(null)} style={{ ...styles.danger, marginTop: 6 }}>
+            すべて完全に削除
+          </button>
+        </>
+      )}
     </Shell>
   );
 }
@@ -2304,6 +2449,25 @@ const styles = {
     borderRadius: 4,
     fontSize: 16,
     color: "#999",
+  },
+  toast: {
+    position: "fixed",
+    left: "50%",
+    transform: "translateX(-50%)",
+    bottom: "calc(env(safe-area-inset-bottom, 0px) + 92px)",
+    zIndex: 70,
+    background: "#1a1a1a",
+    color: "#fff",
+    borderRadius: 12,
+    padding: "12px 16px",
+    fontSize: 14,
+    fontWeight: 600,
+    display: "flex",
+    alignItems: "center",
+    gap: 16,
+    boxShadow: "0 6px 20px rgba(0,0,0,0.3)",
+    width: "max-content",
+    maxWidth: "calc(100% - 32px)",
   },
   newGameFab: {
     position: "fixed",
