@@ -6,6 +6,8 @@ export const DEFAULT_SETTINGS = {
   multiplyPotIn: false, // 倍マッチ中の流局で、ポットへの支払いにも倍率を掛ける
   splitRemainder: "carry", // ポット山分けの端数: carry=ポットに残す / distribute=1点ずつ配る
   doublePeriod: 10, // 倍マッチ周期（0でオフ）
+  declareLine: 5, // 宣言ライン（表示用）
+  deckCount: 1, // デッキ数（表示用）
 };
 
 export const ROUND_TYPE_LABEL = {

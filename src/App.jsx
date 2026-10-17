@@ -25,6 +25,7 @@ import {
   describeRound,
   buildCsv,
 } from "./logic.js";
+import { RulesSheet, RulesFab, recommendFor } from "./RulesPages.jsx";
 
 const PLAYER_COLORS = [
   "#E63946",
@@ -105,6 +106,23 @@ export default function App() {
   const [history, setHistory] = useState(initial.history);
   const [lastSettings, setLastSettings] = useState(initial.lastSettings);
   const [view, setView] = useState({ type: "main" });
+  const [rulesTab, setRulesTab] = useState(null); // null | "rules" | "quick"
+  const rulesPlayerCount = current.phase === "setup" ? current.numPlayers : current.players.length;
+  const wrap = (screen) => (
+    <>
+      {screen}
+      {!rulesTab && <RulesFab onOpen={() => setRulesTab("rules")} />}
+      {rulesTab && (
+        <RulesSheet
+          tab={rulesTab}
+          setTab={setRulesTab}
+          settings={current.settings}
+          playerCount={rulesPlayerCount}
+          onClose={() => setRulesTab(null)}
+        />
+      )}
+    </>
+  );
 
   useEffect(() => {
     try {
@@ -193,7 +211,7 @@ export default function App() {
   };
 
   if (view.type === "history-list" || (view.type === "history-detail" && !history.find((h) => h.id === view.id))) {
-    return (
+    return wrap(
       <HistoryListScreen
         history={history}
         onBack={() => setView({ type: "main" })}
@@ -205,7 +223,7 @@ export default function App() {
 
   if (view.type === "history-detail") {
     const entry = history.find((h) => h.id === view.id);
-    return (
+    return wrap(
       <HistoryDetailScreen
         entry={entry}
         onBack={() => setView({ type: "history-list" })}
@@ -215,7 +233,7 @@ export default function App() {
   }
 
   if (current.phase === "setup") {
-    return (
+    return wrap(
       <SetupScreen
         current={current}
         updateCurrent={updateCurrent}
@@ -223,12 +241,13 @@ export default function App() {
         startGame={startGame}
         historyCount={history.length}
         openHistory={() => setView({ type: "history-list" })}
+        openRules={setRulesTab}
       />
     );
   }
 
   if (current.phase === "result") {
-    return (
+    return wrap(
       <ResultScreen
         game={current}
         onBackToPlay={() => updateCurrent({ phase: "play" })}
@@ -239,7 +258,7 @@ export default function App() {
     );
   }
 
-  return (
+  return wrap(
     <PlayScreen
       game={current}
       updateCurrent={updateCurrent}
@@ -253,7 +272,7 @@ export default function App() {
 // ============ 共通パーツ ============
 function Shell({ children }) {
   return (
-    <div style={{ minHeight: "100vh", padding: "calc(env(safe-area-inset-top, 0px) + 24px) 16px 40px" }}>
+    <div style={{ minHeight: "100vh", padding: "calc(env(safe-area-inset-top, 0px) + 24px) 16px 96px" }}>
       <div style={{ maxWidth: 520, margin: "0 auto", display: "grid", gap: 14 }}>{children}</div>
     </div>
   );
@@ -457,6 +476,34 @@ function SettingsFields({ settings, onChange, inGame }) {
           </>
         )}
       </div>
+
+      <div style={{ borderTop: "1px solid #eee", paddingTop: 16, display: "grid", gap: 14 }}>
+        <div style={{ fontSize: 11, color: "#999" }}>以下はルール解説の表示用（点数計算には影響しません）</div>
+        <div>
+          <label style={styles.label}>宣言ライン</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button style={styles.stepBtn} onClick={() => onChange({ declareLine: Math.max(0, (s.declareLine ?? 5) - 1) })}>
+              −
+            </button>
+            <span style={{ fontSize: 18, fontWeight: 700, minWidth: 90, textAlign: "center" }}>{s.declareLine ?? 5}点以下</span>
+            <button style={styles.stepBtn} onClick={() => onChange({ declareLine: (s.declareLine ?? 5) + 1 })}>
+              ＋
+            </button>
+          </div>
+        </div>
+        <div>
+          <label style={styles.label}>デッキ数</label>
+          <Segmented
+            small
+            value={s.deckCount || 1}
+            onChange={(v) => onChange({ deckCount: v })}
+            options={[
+              { value: 1, label: "1つ（54枚）" },
+              { value: 2, label: "2つ（108枚）" },
+            ]}
+          />
+        </div>
+      </div>
     </div>
   );
 }
@@ -500,8 +547,13 @@ function SettingsSheet({ settings, onChange, onClose }) {
 }
 
 // ============ Setup ============
-function SetupScreen({ current, updateCurrent, updateSettings, startGame, historyCount, openHistory }) {
+function SetupScreen({ current, updateCurrent, updateSettings, startGame, historyCount, openHistory, openRules }) {
   const { numPlayers, nameInputs } = current;
+  const rec = recommendFor(numPlayers);
+  const pickCount = (n) => {
+    updateCurrent({ numPlayers: n });
+    updateSettings(recommendFor(n)); // おすすめを初期値として入れる（あとで変更自由）
+  };
   return (
     <Shell>
       <Header
@@ -516,13 +568,24 @@ function SetupScreen({ current, updateCurrent, updateSettings, startGame, histor
       />
       <p style={styles.sub}>得点計算機 / setup</p>
 
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <button onClick={() => openRules("rules")} style={styles.homeLink}>
+          <span style={{ fontSize: 16, fontWeight: 900 }}>ルール解説</span>
+          <span style={{ fontSize: 11, color: "#888", fontWeight: 600 }}>図つきで確認</span>
+        </button>
+        <button onClick={() => openRules("quick")} style={styles.homeLink}>
+          <span style={{ fontSize: 16, fontWeight: 900 }}>早見表</span>
+          <span style={{ fontSize: 11, color: "#888", fontWeight: 600 }}>点数例・人数別</span>
+        </button>
+      </div>
+
       <div style={styles.card}>
         <label style={styles.label}>人数</label>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {Array.from({ length: MAX_PLAYERS - 1 }, (_, i) => i + 2).map((n) => (
             <button
               key={n}
-              onClick={() => updateCurrent({ numPlayers: n })}
+              onClick={() => pickCount(n)}
               style={{ ...styles.numBtn, ...(numPlayers === n ? styles.numBtnActive : {}) }}
             >
               {n}
@@ -552,6 +615,10 @@ function SetupScreen({ current, updateCurrent, updateSettings, startGame, histor
 
       <div style={styles.card}>
         <h2 style={styles.h2}>ルール設定</h2>
+        <div style={{ fontSize: 12, color: "#666", background: "#f7f5ef", borderRadius: 6, padding: "8px 10px", marginBottom: 16 }}>
+          {numPlayers}人のおすすめ：{rec.deckCount}デッキ・宣言ライン{rec.declareLine}点・流局ポットオン
+          {current.settings.potEnabled ? "" : "（今はオフ）"}
+        </div>
         <SettingsFields settings={current.settings} onChange={updateSettings} />
       </div>
 
@@ -1976,6 +2043,19 @@ const styles = {
     borderRadius: 4,
     fontSize: 16,
     color: "#999",
+  },
+  homeLink: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-start",
+    gap: 2,
+    padding: "14px 16px",
+    border: "none",
+    borderRadius: 10,
+    background: "#fff",
+    boxShadow: "inset 0 0 0 1px #d4d0c4",
+    color: "#1a1a1a",
+    textAlign: "left",
   },
   linkBtn: { background: "none", border: "none", color: "#666", fontSize: 14, fontWeight: 600, padding: "6px 0" },
   headerBtn: {
