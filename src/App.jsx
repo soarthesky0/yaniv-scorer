@@ -27,19 +27,21 @@ import {
 } from "./logic.js";
 import { RulesSheet, RulesFab, recommendFor } from "./RulesPages.jsx";
 
+// 参加順に割り当てる色。先頭から何色取っても互いの差（色差ΔE）が最大になるように並べてある
+// （2人:124 / 4人:73 / 7人:50 / 12人:33）
 const PLAYER_COLORS = [
-  "#E63946",
-  "#1D3557",
-  "#2A9D8F",
-  "#F4A261",
-  "#9D4EDD",
-  "#06A77D",
-  "#D62828",
-  "#118AB2",
-  "#E76F51",
-  "#457B9D",
-  "#B5179E",
-  "#7B6F00",
+  "#E03131", // 赤
+  "#1C64F2", // 青
+  "#14953F", // 緑
+  "#3F4A5A", // スレート
+  "#C99100", // からし
+  "#E0399A", // ピンク
+  "#5BA8F5", // 空色
+  "#F28B95", // ローズ
+  "#1E2F7A", // 紺
+  "#8A4B12", // 茶
+  "#6B7A1F", // オリーブ
+  "#7BB31A", // ライム
 ];
 const POT_COLOR = "#8a8577";
 const MAX_PLAYERS = 12;
@@ -75,31 +77,68 @@ function normalizeGame(g) {
   };
 }
 
+// 保存データ（localStorage・バックアップファイル共通）を読み込める形に整える
+function parseStore(parsed) {
+  const lastSettings = { ...DEFAULT_SETTINGS, ...(parsed.lastSettings || {}) };
+  const cur = { ...emptyCurrent(lastSettings), ...(parsed.current || {}) };
+  if (!cur.nameInputs || cur.nameInputs.length < MAX_PLAYERS) {
+    cur.nameInputs = [...(cur.nameInputs || []), ...defaultNames()].slice(0, MAX_PLAYERS);
+  }
+  return {
+    current: normalizeGame(cur),
+    history: Array.isArray(parsed.history) ? parsed.history.map(normalizeGame) : [],
+    // 保持期間を過ぎたものはここで消える
+    trash: Array.isArray(parsed.trash)
+      ? parsed.trash
+          .filter((t) => Date.now() - new Date(t.deletedAt).getTime() < TRASH_DAYS * DAY_MS)
+          .map((t) => ({ ...normalizeGame(t), deletedAt: t.deletedAt }))
+      : [],
+    lastSettings,
+    lastBackupAt: parsed.lastBackupAt || null,
+  };
+}
+
 function loadStore() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { current: emptyCurrent(), history: [], trash: [], lastSettings: DEFAULT_SETTINGS };
-    const parsed = JSON.parse(raw);
-    const lastSettings = { ...DEFAULT_SETTINGS, ...(parsed.lastSettings || {}) };
-    const cur = { ...emptyCurrent(lastSettings), ...(parsed.current || {}) };
-    if (!cur.nameInputs || cur.nameInputs.length < MAX_PLAYERS) {
-      cur.nameInputs = [...(cur.nameInputs || []), ...defaultNames()].slice(0, MAX_PLAYERS);
-    }
-    return {
-      current: normalizeGame(cur),
-      history: Array.isArray(parsed.history) ? parsed.history.map(normalizeGame) : [],
-      // 保持期間を過ぎたものはここで消える
-      trash: Array.isArray(parsed.trash)
-        ? parsed.trash
-            .filter((t) => Date.now() - new Date(t.deletedAt).getTime() < TRASH_DAYS * DAY_MS)
-            .map((t) => ({ ...normalizeGame(t), deletedAt: t.deletedAt }))
-        : [],
-      lastSettings,
-    };
+    if (!raw) return parseStore({});
+    return parseStore(JSON.parse(raw));
   } catch {
-    return { current: emptyCurrent(), history: [], trash: [], lastSettings: DEFAULT_SETTINGS };
+    return parseStore({});
   }
 }
+
+const sortByFinished = (list) =>
+  [...list].sort(
+    (a, b) => new Date(b.finishedAt || b.startedAt || 0).getTime() - new Date(a.finishedAt || a.startedAt || 0).getTime()
+  );
+
+// 共有シート（iPhone）か、だめならダウンロード
+async function shareOrDownload(blob, filename, type) {
+  try {
+    const file = new File([blob], filename, { type });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: filename });
+      return "shared";
+    }
+  } catch (e) {
+    if (e && e.name === "AbortError") return "aborted";
+  }
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  return "downloaded";
+}
+
+const stampOf = (d) =>
+  `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}_${String(
+    d.getHours()
+  ).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}`;
 
 function formatDate(iso) {
   const d = new Date(iso);
@@ -113,6 +152,7 @@ export default function App() {
   const [current, setCurrent] = useState(initial.current);
   const [history, setHistory] = useState(initial.history);
   const [trash, setTrash] = useState(initial.trash);
+  const [lastBackupAt, setLastBackupAt] = useState(initial.lastBackupAt);
   const [toast, setToast] = useState(null); // { text, undo }
   const toastTimer = useRef(null);
   const showToast = (t) => {
@@ -123,6 +163,19 @@ export default function App() {
   const [lastSettings, setLastSettings] = useState(initial.lastSettings);
   const [view, setView] = useState({ type: "main" });
   const [rulesTab, setRulesTab] = useState(null); // null | "rules" | "quick"
+  // 過去に出た名前（多い順、同数なら最近の順）
+  const knownNames = useMemo(() => {
+    const count = {};
+    const recent = {};
+    history.forEach((h, gi) => {
+      h.players.forEach((n) => {
+        count[n] = (count[n] || 0) + 1;
+        if (recent[n] === undefined) recent[n] = gi;
+      });
+    });
+    return Object.keys(count).sort((a, b) => count[b] - count[a] || recent[a] - recent[b]);
+  }, [history]);
+  const lastMembers = history[0]?.players || null;
   const rulesPlayerCount = current.phase === "setup" ? current.numPlayers : current.players.length;
   const wrap = (screen) => (
     <>
@@ -158,9 +211,56 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ current, history, trash, lastSettings }));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify({ current, history, trash, lastSettings, lastBackupAt }));
     } catch {}
-  }, [current, history, trash, lastSettings]);
+  }, [current, history, trash, lastSettings, lastBackupAt]);
+
+  // ===== バックアップ =====
+  const exportBackup = async () => {
+    const now = new Date();
+    const payload = {
+      app: "yaniv-scorer",
+      version: 1,
+      exportedAt: now.toISOString(),
+      data: { current, history, trash, lastSettings },
+    };
+    const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
+    const res = await shareOrDownload(blob, `yaniv_backup_${stampOf(now)}.json`, "application/json");
+    if (res !== "aborted") {
+      setLastBackupAt(now.toISOString());
+      showToast({ text: "バックアップを書き出しました" });
+    }
+  };
+
+  const importBackup = async (file) => {
+    let parsed;
+    try {
+      const json = JSON.parse(await file.text());
+      if (json.app !== "yaniv-scorer" || !json.data) throw new Error("format");
+      parsed = parseStore(json.data);
+    } catch {
+      alert("このファイルは読み込めませんでした。ヤニブ得点計算機のバックアップ（.json）を選んでください。");
+      return;
+    }
+    const known = new Set(history.map((h) => h.id));
+    const added = parsed.history.filter((h) => !known.has(h.id));
+    const curLocalEmpty = current.rounds.length === 0;
+    const takeCurrent = curLocalEmpty && parsed.current.rounds.length > 0 && parsed.current.phase === "play";
+    if (added.length === 0 && !takeCurrent) {
+      alert("新しく追加される試合はありませんでした（すべて取り込み済み）");
+      return;
+    }
+    const msg =
+      `${added.length}試合を履歴に追加します` +
+      (takeCurrent ? "\n進行中だった試合も復元します" : "") +
+      "\n（今ある記録は消えません）";
+    if (!confirm(msg)) return;
+    setHistory((prev) => sortByFinished([...prev, ...added]));
+    const trashIds = new Set([...trash.map((t) => t.id), ...history.map((h) => h.id), ...added.map((h) => h.id)]);
+    setTrash((prev) => [...prev, ...parsed.trash.filter((t) => !trashIds.has(t.id))]);
+    if (takeCurrent) setCurrent(parsed.current);
+    showToast({ text: `${added.length}試合を読み込みました` });
+  };
 
   const updateCurrent = useCallback((patch) => {
     setCurrent((prev) => ({ ...prev, ...(typeof patch === "function" ? patch(prev) : patch) }));
@@ -233,11 +333,7 @@ export default function App() {
       const entry = prevTrash.find((t) => t.id === id);
       if (entry) {
         const { deletedAt, ...rest } = entry;
-        setHistory((prev) =>
-          [rest, ...prev.filter((h) => h.id !== id)].sort((a, b) =>
-            (b.finishedAt || b.startedAt).localeCompare(a.finishedAt || a.startedAt)
-          )
-        );
+        setHistory((prev) => sortByFinished([rest, ...prev.filter((h) => h.id !== id)]));
       }
       return prevTrash.filter((t) => t.id !== id);
     });
@@ -291,6 +387,9 @@ export default function App() {
         onDelete={deleteHistory}
         trashCount={trash.length}
         openTrash={() => setView({ type: "trash" })}
+        lastBackupAt={lastBackupAt}
+        onExport={exportBackup}
+        onImport={importBackup}
         onNewGame={() => {
           if (newGame()) setView({ type: "main" });
         }}
@@ -319,6 +418,8 @@ export default function App() {
         historyCount={history.length}
         openHistory={() => setView({ type: "history-list" })}
         openRules={setRulesTab}
+        knownNames={knownNames}
+        lastMembers={lastMembers}
       />
     );
   }
@@ -342,6 +443,7 @@ export default function App() {
       updateSettings={updateSettings}
       goResult={goResult}
       onNewGame={newGame}
+      knownNames={knownNames}
     />
   );
 }
@@ -479,6 +581,23 @@ function NumInput({ value, onChange, placeholder = "手札", width = 76, autoFoc
       placeholder={placeholder}
       style={{ ...styles.input, flex: "none", width, textAlign: "right", fontSize: 17 }}
     />
+  );
+}
+
+function NameChips({ names, onPick }) {
+  return (
+    <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      {names.map((n) => (
+        <button
+          key={n}
+          onMouseDown={(e) => e.preventDefault()}
+          onClick={() => onPick(n)}
+          style={{ ...styles.chip, padding: "7px 12px", fontSize: 14 }}
+        >
+          {n}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -624,23 +743,59 @@ function SettingsSheet({ settings, onChange, onClose }) {
 }
 
 // ============ Setup ============
-function SetupScreen({ current, updateCurrent, updateSettings, startGame, historyCount, openHistory, openRules }) {
+function SetupScreen({
+  current,
+  updateCurrent,
+  updateSettings,
+  startGame,
+  historyCount,
+  openHistory,
+  openRules,
+  knownNames = [],
+  lastMembers,
+}) {
   const { numPlayers, nameInputs } = current;
   const rec = recommendFor(numPlayers);
   const pickCount = (n) => {
     updateCurrent({ numPlayers: n });
     updateSettings(recommendFor(n)); // おすすめを初期値として入れる（あとで変更自由）
   };
+
+  // 名前欄：未入力（空欄かP1などの仮名）かどうか
+  const isBlank = (v) => !v || !v.trim() || /^P\d+$/.test(v.trim());
+  const [focusIdx, setFocusIdx] = useState(null);
+  const active = nameInputs.slice(0, numPlayers);
+  const suggestions = knownNames.filter((n) => !active.some((v) => v.trim() === n));
+  const fillName = (name) => {
+    let target = focusIdx !== null && focusIdx < numPlayers ? focusIdx : active.findIndex(isBlank);
+    if (target < 0) return;
+    const next = [...nameInputs];
+    next[target] = name;
+    updateCurrent({ nameInputs: next });
+    // 次の空き欄へ
+    const after = next.slice(0, numPlayers).findIndex((v, i) => i > target && isBlank(v));
+    const anyBlank = next.slice(0, numPlayers).findIndex(isBlank);
+    setFocusIdx(after >= 0 ? after : anyBlank >= 0 ? anyBlank : null);
+  };
+
+  const sameAsLast =
+    lastMembers && lastMembers.length === numPlayers && lastMembers.every((n, i) => active[i]?.trim() === n);
+  const useLastMembers = () => {
+    const n = lastMembers.length;
+    const next = [...nameInputs];
+    lastMembers.forEach((name, i) => (next[i] = name));
+    updateCurrent({ numPlayers: n, nameInputs: next });
+    updateSettings(recommendFor(n));
+    setFocusIdx(null);
+  };
   return (
     <Shell>
       <Header
         title="YANIV"
         right={
-          historyCount > 0 && (
-            <button onClick={openHistory} style={styles.headerBtn}>
-              履歴 ({historyCount}) →
-            </button>
-          )
+          <button onClick={openHistory} style={styles.headerBtn}>
+            履歴{historyCount > 0 ? ` (${historyCount})` : ""} →
+          </button>
         }
       />
       <p style={styles.sub}>得点計算機 / setup</p>
@@ -657,6 +812,47 @@ function SetupScreen({ current, updateCurrent, updateSettings, startGame, histor
       </div>
 
       <div style={styles.card}>
+        {lastMembers && lastMembers.length >= 2 && (
+          <button
+            onClick={useLastMembers}
+            disabled={sameAsLast}
+            style={{
+              width: "100%",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 10,
+              padding: "12px 14px",
+              marginBottom: 18,
+              border: "none",
+              borderRadius: 10,
+              background: sameAsLast ? "#f7f5ef" : "#1a1a1a",
+              color: sameAsLast ? "#999" : "#fff",
+              textAlign: "left",
+            }}
+          >
+            <span style={{ minWidth: 0 }}>
+              <span style={{ display: "block", fontSize: 15, fontWeight: 800 }}>
+                {sameAsLast ? "前回のメンバーを入力済み" : "前回のメンバーで始める"}
+              </span>
+              <span
+                style={{
+                  display: "block",
+                  fontSize: 12,
+                  opacity: 0.75,
+                  marginTop: 2,
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                }}
+              >
+                {lastMembers.length}人 · {lastMembers.join("・")}
+              </span>
+            </span>
+            {!sameAsLast && <span style={{ fontSize: 20, fontWeight: 300 }}>→</span>}
+          </button>
+        )}
+
         <label style={styles.label}>人数</label>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {Array.from({ length: MAX_PLAYERS - 1 }, (_, i) => i + 2).map((n) => (
@@ -677,17 +873,32 @@ function SetupScreen({ current, updateCurrent, updateSettings, startGame, histor
               <Dot idx={i} size={14} />
               <input
                 value={nameInputs[i]}
+                onFocus={(e) => {
+                  setFocusIdx(i);
+                  if (/^P\d+$/.test(e.target.value)) e.target.select();
+                }}
                 onChange={(e) => {
                   const next = [...nameInputs];
                   next[i] = e.target.value;
                   updateCurrent({ nameInputs: next });
                 }}
-                style={styles.input}
+                style={{
+                  ...styles.input,
+                  ...(focusIdx === i ? { boxShadow: "0 0 0 2px #1a1a1a", borderColor: "#1a1a1a" } : {}),
+                }}
                 placeholder={`P${i + 1}`}
               />
             </div>
           ))}
         </div>
+        {suggestions.length > 0 && (
+          <div style={{ marginTop: 12 }}>
+            <div style={{ fontSize: 11, color: "#999", marginBottom: 6 }}>
+              タップで{focusIdx !== null && focusIdx < numPlayers ? `${focusIdx + 1}人目` : "空いている欄"}に入力
+            </div>
+            <NameChips names={suggestions} onPick={fillName} />
+          </div>
+        )}
       </div>
 
       <div style={styles.card}>
@@ -718,7 +929,7 @@ const emptyInput = (n) => ({
   manualTransfers: [{ from: 0, to: 1, points: "" }],
 });
 
-function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame }) {
+function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, knownNames = [] }) {
   const { players, rounds, settings, doubleLog } = game;
   const joinedAt = game.joinedAt || [];
   const roundNo = rounds.length + 1;
@@ -950,6 +1161,11 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame }
               <div style={{ fontSize: 11, color: "#999", marginTop: 6 }}>
                 R{roundNo}から参加、持ち点0で始まります
               </div>
+              {knownNames.filter((n) => !players.includes(n)).length > 0 && (
+                <div style={{ marginTop: 10 }}>
+                  <NameChips names={knownNames.filter((n) => !players.includes(n))} onPick={(n) => setJoinName(n)} />
+                </div>
+              )}
               <button onClick={() => setJoinOpen(false)} style={{ ...styles.linkBtn, marginTop: 4 }}>
                 やめる
               </button>
@@ -1584,31 +1800,9 @@ function niceStep(x) {
 
 // ============ CSV ============
 async function exportCsv(game) {
-  const csv = "﻿" + buildCsv(game.players, game.rounds, game.joinedAt || []);
-  const d = new Date(game.startedAt || Date.now());
-  const stamp = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(
-    2,
-    "0"
-  )}_${String(d.getHours()).padStart(2, "0")}${String(d.getMinutes()).padStart(2, "0")}`;
-  const filename = `yaniv_${stamp}.csv`;
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-  try {
-    const file = new File([blob], filename, { type: "text/csv" });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {
-      await navigator.share({ files: [file], title: filename });
-      return;
-    }
-  } catch (e) {
-    if (e && e.name === "AbortError") return;
-  }
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = filename;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
+  const csv = "\uFEFF" + buildCsv(game.players, game.rounds, game.joinedAt || []);
+  const filename = `yaniv_${stampOf(new Date(game.startedAt || Date.now()))}.csv`;
+  await shareOrDownload(new Blob([csv], { type: "text/csv;charset=utf-8" }), filename, "text/csv");
 }
 
 // ============ Result（現在ゲーム・履歴詳細の共通部分） ============
@@ -2109,7 +2303,18 @@ function HistoryCard({ h, onSelect, onDelete, footer }) {
   );
 }
 
-function HistoryListScreen({ history, onBack, onSelect, onDelete, onNewGame, trashCount, openTrash }) {
+function HistoryListScreen({
+  history,
+  onBack,
+  onSelect,
+  onDelete,
+  onNewGame,
+  trashCount,
+  openTrash,
+  lastBackupAt,
+  onExport,
+  onImport,
+}) {
   // 通算成績（名前ごと）
   const summary = useMemo(() => {
     const stats = {};
@@ -2237,11 +2442,67 @@ function HistoryListScreen({ history, onBack, onSelect, onDelete, onNewGame, tra
         </button>
       )}
 
+      <BackupCard history={history} lastBackupAt={lastBackupAt} onExport={onExport} onImport={onImport} />
+
       <button onClick={onNewGame} style={styles.newGameFab} aria-label="新規ゲーム">
         <span style={{ fontSize: 26, lineHeight: 1, fontWeight: 300 }}>＋</span>
         <span style={{ fontSize: 10, fontWeight: 800, marginTop: 1 }}>新規</span>
       </button>
     </Shell>
+  );
+}
+
+function BackupCard({ history, lastBackupAt, onExport, onImport }) {
+  const fileRef = useRef(null);
+  const since = lastBackupAt
+    ? history.filter((h) => new Date(h.finishedAt || h.startedAt).getTime() > new Date(lastBackupAt).getTime()).length
+    : history.length;
+  let status;
+  if (!lastBackupAt) status = history.length ? "まだバックアップしていません" : "記録はまだありません";
+  else {
+    const days = Math.floor((Date.now() - new Date(lastBackupAt).getTime()) / DAY_MS);
+    status = `最終バックアップ：${days === 0 ? "今日" : `${days}日前`}`;
+  }
+  const warn = history.length > 0 && since > 0;
+  return (
+    <div style={{ ...styles.card, marginTop: 6 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 8 }}>
+        <h2 style={{ ...styles.h2, margin: 0 }}>バックアップ</h2>
+        <span style={{ fontSize: 12, color: warn ? "#E03131" : "#999", fontWeight: 700 }}>{status}</span>
+      </div>
+      <p style={{ fontSize: 12, color: "#666", lineHeight: 1.6, margin: "8px 0 12px" }}>
+        記録はこのスマホの中にだけ保存されています。ホーム画面のアイコンを消したり機種変更したりすると消えるので、ときどき書き出して「ファイル」などに保存してください。
+        {warn && lastBackupAt && (
+          <strong style={{ color: "#E03131" }}> 前回から{since}試合増えています。</strong>
+        )}
+      </p>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+        <button
+          onClick={onExport}
+          style={{ ...styles.primary, padding: 12, fontSize: 14, opacity: history.length ? 1 : 0.35 }}
+          disabled={!history.length}
+        >
+          書き出す
+        </button>
+        <button onClick={() => fileRef.current?.click()} style={{ ...styles.secondary, padding: 12, fontSize: 14 }}>
+          読み込む
+        </button>
+      </div>
+      <input
+        ref={fileRef}
+        type="file"
+        accept="application/json,.json"
+        style={{ display: "none" }}
+        onChange={(e) => {
+          const f = e.target.files && e.target.files[0];
+          e.target.value = "";
+          if (f) onImport(f);
+        }}
+      />
+      <div style={{ fontSize: 11, color: "#aaa", marginTop: 8 }}>
+        読み込みは追加のみで、今ある記録は消えません（同じ試合は重複しません）
+      </div>
+    </div>
   );
 }
 
