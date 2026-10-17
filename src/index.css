@@ -29,3 +29,12 @@ select {
     padding-bottom: env(safe-area-inset-bottom);
   }
 }
+
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(230, 57, 70, 0.55); }
+  50% { box-shadow: 0 0 0 8px rgba(230, 57, 70, 0); }
+}
+
+button:disabled {
+  cursor: default;
+}
