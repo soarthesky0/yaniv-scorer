@@ -176,13 +176,14 @@ export default function App() {
 
   const newGame = () => {
     if (current.rounds.length > 0 && current.phase !== "result") {
-      if (!confirm("進行中のゲームを破棄して新しく始める？")) return;
+      if (!confirm("進行中のゲームを破棄して新しく始める？")) return false;
     }
     setCurrent({
       ...emptyCurrent(lastSettings),
       numPlayers: current.numPlayers,
       nameInputs: current.nameInputs,
     });
+    return true;
   };
 
   const deleteHistory = (id) => {
@@ -217,6 +218,9 @@ export default function App() {
         onBack={() => setView({ type: "main" })}
         onSelect={(id) => setView({ type: "history-detail", id })}
         onDelete={deleteHistory}
+        onNewGame={() => {
+          if (newGame()) setView({ type: "main" });
+        }}
       />
     );
   }
@@ -1844,7 +1848,220 @@ function ResultScreen({ game, onBackToPlay, onNewGame, openHistory, historyCount
 }
 
 // ============ 履歴 ============
-function HistoryListScreen({ history, onBack, onSelect, onDelete }) {
+function dayLabel(iso) {
+  const d = new Date(iso);
+  const today = new Date();
+  const start = (x) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diff = Math.round((start(today) - start(d)) / 86400000);
+  const md = `${d.getMonth() + 1}月${d.getDate()}日`;
+  const wd = "日月火水木金土"[d.getDay()];
+  if (diff === 0) return `今日 · ${md}（${wd}）`;
+  if (diff === 1) return `昨日 · ${md}（${wd}）`;
+  return `${d.getFullYear() === today.getFullYear() ? "" : d.getFullYear() + "年"}${md}（${wd}）`;
+}
+
+function timeLabel(iso) {
+  const d = new Date(iso);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+// 全員の累計推移を小さく描く
+function Sparkline({ players, series, width = 112, height = 56 }) {
+  const vals = series.flatMap((pt) => players.map((p) => pt[p])).filter((v) => typeof v === "number");
+  const min = Math.min(0, ...vals);
+  const max = Math.max(0, ...vals);
+  const span = max - min || 1;
+  const n = Math.max(1, series.length - 1);
+  const X = (i) => 2 + (i / n) * (width - 4);
+  const Y = (v) => 3 + (1 - (v - min) / span) * (height - 6);
+  return (
+    <svg width={width} height={height} viewBox={`0 0 ${width} ${height}`} style={{ display: "block", flexShrink: 0 }}>
+      <rect width={width} height={height} rx={6} fill="#f7f5ef" />
+      <line x1={2} x2={width - 2} y1={Y(0)} y2={Y(0)} stroke="#d4d0c4" strokeDasharray="2 2" />
+      {players.map((p, i) => {
+        const pts = series
+          .map((pt, k) => (typeof pt[p] === "number" ? `${X(k).toFixed(1)},${Y(pt[p]).toFixed(1)}` : null))
+          .filter(Boolean);
+        if (pts.length < 2) return null;
+        return (
+          <polyline
+            key={i}
+            points={pts.join(" ")}
+            fill="none"
+            stroke={PLAYER_COLORS[i % PLAYER_COLORS.length]}
+            strokeWidth={1.6}
+            strokeLinejoin="round"
+            strokeLinecap="round"
+          />
+        );
+      })}
+    </svg>
+  );
+}
+
+const MEDAL = ["#C9A227", "#9AA0A6", "#B87333"];
+
+function HistoryCard({ h, onSelect, onDelete }) {
+  const joinedAt = h.joinedAt || [];
+  const cum = useMemo(() => computeCumulative(h.players, h.rounds, joinedAt), [h]);
+  const ranked = computeRanked(h.players, cum.totals);
+  const backs = h.rounds.filter((r) => r.type === "back").length;
+  const draws = h.rounds.filter((r) => r.type === "draw").length;
+  const mults = h.rounds.filter((r) => (r.multiplier || 1) > 1).length;
+  const maxPot = h.rounds.reduce((m, r) => Math.max(m, r.potAfter || 0), 0);
+  const chips = [
+    backs > 0 && { label: `返し ${backs}`, color: "#E63946" },
+    mults > 0 && { label: `倍マッチ ${mults}`, color: "#F4A261" },
+    draws > 0 && { label: `流局 ${draws}`, color: "#6b675c" },
+    maxPot > 0 && { label: `最高ポット ${maxPot}`, color: "#1a1a1a" },
+  ].filter(Boolean);
+
+  return (
+    <div
+      onClick={() => onSelect(h.id)}
+      style={{ ...styles.card, padding: 0, overflow: "hidden", cursor: "pointer", position: "relative" }}
+    >
+      <div style={{ display: "flex", gap: 14, padding: "14px 16px 12px", alignItems: "stretch" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ display: "flex", alignItems: "baseline", gap: 8, fontSize: 12, color: "#999" }}>
+            <span style={{ fontWeight: 800, color: "#666", fontFamily: "monospace" }}>{timeLabel(h.finishedAt || h.startedAt)}</span>
+            <span>
+              {h.players.length}人 · {h.rounds.length}R{h.settings?.potEnabled ? " · ポット" : ""}
+            </span>
+          </div>
+          <div style={{ display: "grid", gap: 3, marginTop: 8 }}>
+            {ranked.slice(0, 3).map((r, i) => (
+              <div key={r.idx} style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                <span
+                  style={{
+                    width: i === 0 ? 22 : 18,
+                    height: i === 0 ? 22 : 18,
+                    borderRadius: "50%",
+                    background: MEDAL[i],
+                    color: "#fff",
+                    fontSize: i === 0 ? 12 : 10,
+                    fontWeight: 900,
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexShrink: 0,
+                  }}
+                >
+                  {i + 1}
+                </span>
+                <Dot idx={r.idx} size={8} />
+                <span
+                  style={{
+                    fontSize: i === 0 ? 18 : 14,
+                    fontWeight: i === 0 ? 900 : 600,
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                    whiteSpace: "nowrap",
+                  }}
+                >
+                  {r.name}
+                </span>
+                <span
+                  style={{
+                    marginLeft: "auto",
+                    fontFamily: "monospace",
+                    fontSize: i === 0 ? 16 : 13,
+                    fontWeight: 700,
+                    color: r.score > 0 ? "#2A9D8F" : r.score < 0 ? "#E63946" : "#999",
+                  }}
+                >
+                  {r.score > 0 ? `+${r.score}` : r.score}
+                </span>
+              </div>
+            ))}
+            {ranked.length > 3 && (
+              <div style={{ fontSize: 11, color: "#aaa", paddingLeft: 26 }}>
+                ほか {ranked.slice(3).map((r) => r.name).join("・")}
+              </div>
+            )}
+          </div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", justifyContent: "space-between" }}>
+          <Sparkline players={h.players} series={cum.series} />
+          <span style={{ fontSize: 12, color: "#999", fontWeight: 700 }}>詳細 →</span>
+        </div>
+      </div>
+      {(
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            padding: "9px 16px",
+            borderTop: "1px solid #f0ede5",
+            background: "#fcfbf8",
+            flexWrap: "wrap",
+          }}
+        >
+          {chips.length === 0 && <span style={{ fontSize: 11, color: "#bbb" }}>波乱なし</span>}
+          {chips.map((c) => (
+            <span
+              key={c.label}
+              style={{
+                fontSize: 11,
+                fontWeight: 700,
+                color: c.color,
+                background: "#fff",
+                boxShadow: `inset 0 0 0 1px ${c.color}55`,
+                borderRadius: 10,
+                padding: "2px 8px",
+              }}
+            >
+              {c.label}
+            </span>
+          ))}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              onDelete(h.id);
+            }}
+            style={{ ...styles.linkBtn, marginLeft: "auto", fontSize: 12, color: "#c0392b", padding: "2px 0" }}
+          >
+            削除
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HistoryListScreen({ history, onBack, onSelect, onDelete, onNewGame }) {
+  // 通算成績（名前ごと）
+  const summary = useMemo(() => {
+    const stats = {};
+    let rounds = 0;
+    history.forEach((h) => {
+      rounds += h.rounds.length;
+      const cum = computeCumulative(h.players, h.rounds, h.joinedAt || []);
+      const ranked = computeRanked(h.players, cum.totals);
+      ranked.forEach((r, i) => {
+        const s = (stats[r.name] = stats[r.name] || { name: r.name, games: 0, wins: 0, total: 0 });
+        s.games++;
+        s.total += r.score;
+        if (i === 0) s.wins++;
+      });
+    });
+    const list = Object.values(stats).sort((a, b) => b.wins - a.wins || b.total - a.total);
+    return { list, rounds };
+  }, [history]);
+
+  // 日付ごとにまとめる
+  const groups = useMemo(() => {
+    const out = [];
+    history.forEach((h) => {
+      const label = dayLabel(h.finishedAt || h.startedAt);
+      const last = out[out.length - 1];
+      if (last && last.label === label) last.items.push(h);
+      else out.push({ label, items: [h] });
+    });
+    return out;
+  }, [history]);
+
   return (
     <Shell>
       <Header
@@ -1855,42 +2072,86 @@ function HistoryListScreen({ history, onBack, onSelect, onDelete }) {
           </button>
         }
       />
-      <p style={styles.sub}>{history.length} games</p>
 
       {history.length === 0 ? (
-        <div style={{ ...styles.card, textAlign: "center", color: "#999" }}>まだ記録がありません</div>
+        <div style={{ ...styles.card, textAlign: "center", padding: "40px 20px" }}>
+          <div style={{ fontSize: 36, fontWeight: 900, color: "#e5e2da" }}>0</div>
+          <div style={{ fontSize: 15, fontWeight: 700, marginTop: 6 }}>まだ記録がありません</div>
+          <div style={{ fontSize: 12, color: "#999", marginTop: 6 }}>「結果を見る」を押した試合がここに残ります</div>
+        </div>
       ) : (
-        <div style={{ display: "grid", gap: 8 }}>
-          {history.map((h) => (
-            <div key={h.id} style={styles.card}>
-              <div onClick={() => onSelect(h.id)} style={{ cursor: "pointer" }}>
-                <div style={{ fontSize: 11, color: "#999", letterSpacing: "0.05em" }}>
-                  {formatDate(h.finishedAt || h.startedAt)}
-                  {h.settings?.potEnabled ? "　流局ポットあり" : ""}
-                </div>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginTop: 6 }}>
-                  <div>
-                    <span style={{ fontSize: 18, fontWeight: 700 }}>1位 {h.winner}</span>
-                    <span style={{ fontSize: 13, color: "#666", marginLeft: 8, fontFamily: "monospace" }}>
-                      {h.winnerScore}
+        <>
+          <div style={{ ...styles.card, background: "#1a1a1a", color: "#f4f1ea", border: "none" }}>
+            <div style={{ display: "flex", gap: 18 }}>
+              <div>
+                <div style={{ ...styles.miniLabel, color: "#8a8577" }}>GAMES</div>
+                <div style={{ fontSize: 34, fontWeight: 900, lineHeight: 1.1 }}>{history.length}</div>
+              </div>
+              <div>
+                <div style={{ ...styles.miniLabel, color: "#8a8577" }}>ROUNDS</div>
+                <div style={{ fontSize: 34, fontWeight: 900, lineHeight: 1.1 }}>{summary.rounds}</div>
+              </div>
+            </div>
+            <div style={{ ...styles.miniLabel, color: "#8a8577", marginTop: 14, marginBottom: 8 }}>通算 1位回数</div>
+            <div style={{ display: "grid", gap: 6 }}>
+              {summary.list.slice(0, 5).map((p, i) => {
+                const max = summary.list[0].wins || 1;
+                return (
+                  <div key={p.name} style={{ display: "grid", gridTemplateColumns: "18px 1fr auto", gap: 8, alignItems: "center" }}>
+                    <span style={{ fontSize: 12, fontWeight: 900, color: i < 3 ? MEDAL[i] : "#8a8577" }}>{i + 1}</span>
+                    <div style={{ position: "relative", height: 24, display: "flex", alignItems: "center" }}>
+                      <div
+                        style={{
+                          position: "absolute",
+                          left: 0,
+                          top: 4,
+                          bottom: 4,
+                          width: `${(p.wins / max) * 100}%`,
+                          background: i < 3 ? MEDAL[i] : "#555",
+                          opacity: 0.35,
+                          borderRadius: 3,
+                        }}
+                      />
+                      <span style={{ position: "relative", paddingLeft: 8, fontSize: 14, fontWeight: 700 }}>{p.name}</span>
+                    </div>
+                    <span style={{ fontSize: 12, color: "#b9b4a6", fontFamily: "monospace" }}>
+                      <strong style={{ color: "#fff", fontSize: 15 }}>{p.wins}</strong> / {p.games}試合
                     </span>
                   </div>
-                  <span style={{ fontSize: 12, color: "#999" }}>
-                    {h.players.length}人 / {h.rounds.length}R →
-                  </span>
-                </div>
-                <div style={{ fontSize: 12, color: "#666", marginTop: 6 }}>{h.players.join(" · ")}</div>
-              </div>
-              <button
-                onClick={() => onDelete(h.id)}
-                style={{ ...styles.linkBtn, color: "#c0392b", marginTop: 10, fontSize: 11 }}
+                );
+              })}
+            </div>
+          </div>
+
+          {groups.map((g) => (
+            <div key={g.label} style={{ display: "grid", gap: 8 }}>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 10,
+                  fontSize: 13,
+                  fontWeight: 800,
+                  color: "#666",
+                  marginTop: 6,
+                }}
               >
-                削除
-              </button>
+                {g.label}
+                <span style={{ flex: 1, height: 1, background: "#e5e2da" }} />
+                <span style={{ fontSize: 11, color: "#aaa", fontWeight: 600 }}>{g.items.length}試合</span>
+              </div>
+              {g.items.map((h) => (
+                <HistoryCard key={h.id} h={h} onSelect={onSelect} onDelete={onDelete} />
+              ))}
             </div>
           ))}
-        </div>
+        </>
       )}
+
+      <button onClick={onNewGame} style={styles.newGameFab} aria-label="新規ゲーム">
+        <span style={{ fontSize: 26, lineHeight: 1, fontWeight: 300 }}>＋</span>
+        <span style={{ fontSize: 10, fontWeight: 800, marginTop: 1 }}>新規</span>
+      </button>
     </Shell>
   );
 }
@@ -2043,6 +2304,23 @@ const styles = {
     borderRadius: 4,
     fontSize: 16,
     color: "#999",
+  },
+  newGameFab: {
+    position: "fixed",
+    left: 16,
+    bottom: "calc(env(safe-area-inset-bottom, 0px) + 16px)",
+    zIndex: 40,
+    width: 64,
+    height: 64,
+    borderRadius: "50%",
+    border: "none",
+    background: "#E63946",
+    color: "#fff",
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    justifyContent: "center",
+    boxShadow: "0 6px 16px rgba(230,57,70,0.4)",
   },
   homeLink: {
     display: "flex",
