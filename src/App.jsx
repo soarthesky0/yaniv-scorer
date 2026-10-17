@@ -433,13 +433,9 @@ function SettingsFields({ settings, onChange, inGame }) {
             </div>
             <Toggle
               label="倍マッチの流局で支払いにも倍率"
+              note="オンだと手札合計×倍率をポットへ"
               value={s.multiplyPotIn}
               onChange={(v) => onChange({ multiplyPotIn: v })}
-            />
-            <Toggle
-              label="倍マッチのポット獲得にも倍率"
-              value={s.multiplyPotOut}
-              onChange={(v) => onChange({ multiplyPotOut: v })}
             />
             <div>
               <label style={styles.label}>山分けの端数</label>

@@ -4,7 +4,6 @@ export const DEFAULT_SETTINGS = {
   potEnabled: false, // 流局ポット
   potRate: 1, // ポットへの支払い倍率
   multiplyPotIn: false, // 倍マッチ中の流局で、ポットへの支払いにも倍率を掛ける
-  multiplyPotOut: false, // 倍マッチ中のポット獲得で、ポットにも倍率を掛ける
   splitRemainder: "carry", // ポット山分けの端数: carry=ポットに残す / distribute=1点ずつ配る
   doublePeriod: 10, // 倍マッチ周期（0でオフ）
 };
@@ -48,7 +47,7 @@ export function computeRound(input, playerCount, potBefore, settings) {
       const each = Math.ceil(diff / targets.length) * mult; // 折半は宣言者有利に切り上げ
       if (each > 0) targets.forEach((t) => transfers.push({ from: t, to: d, points: each }));
       if (s.potEnabled && potBefore > 0) {
-        potOut[d] = potBefore * (mult > 1 && s.multiplyPotOut ? mult : 1);
+        potOut[d] = potBefore; // ポットは出し合った点の合計なので倍率は掛けない
         potAfter = 0;
       }
     } else {
@@ -59,14 +58,13 @@ export function computeRound(input, playerCount, potBefore, settings) {
         const k = targets.length;
         const base = Math.floor(potBefore / k);
         let rem = potBefore - base * k;
-        const factor = mult > 1 && s.multiplyPotOut ? mult : 1;
         targets.forEach((t) => {
           let share = base;
           if (s.splitRemainder === "distribute" && rem > 0) {
             share += 1;
             rem -= 1;
           }
-          potOut[t] = share * factor;
+          potOut[t] = share;
         });
         potAfter = s.splitRemainder === "distribute" ? 0 : rem;
       }
