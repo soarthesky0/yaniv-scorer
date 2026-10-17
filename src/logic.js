@@ -241,7 +241,7 @@ export function describeRound(r, players) {
       `${head} ${name(r.declarer)}(${r.declarerHand}) vs ${(r.targets || []).map(name).join("・")}(${r.targetHand})`
     );
   } else if (r.type === "draw") {
-    parts.push(`${head} ${(r.hands || []).map((h, i) => `${name(i)}${h}`).join(" ")}`);
+    parts.push(`${head} ${(r.hands || []).map((h, i) => `${name(i)} ${h}`).join("・")}`);
   } else {
     parts.push(head);
   }
