@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import QRCode from "qrcode";
-import { Shell, Header, Dot, ScoreChart, styles, PLAYER_COLORS } from "./App.jsx";
+import { Shell, Header, Dot, ScoreChart, StatsBoard, NextStarter, styles, PLAYER_COLORS } from "./App.jsx";
 import { RulesSheet, RulesFab } from "./RulesPages.jsx";
 import { computeSettlement } from "./logic.js";
 import {
@@ -440,6 +440,10 @@ export function LiveViewer({ code }) {
             </div>
           )}
 
+          {snap.ph === "play" && snap.ns && (
+            <NextStarter players={players} info={{ who: snap.ns.w, amount: snap.ns.a, all: snap.ns.all }} prevRound={snap.r} />
+          )}
+
           <div style={styles.card}>
             <h2 style={styles.h2}>{snap.ph === "result" ? "最終順位" : "順位"}</h2>
             <div style={{ display: "grid", gap: 2 }}>
@@ -507,7 +511,12 @@ export function LiveViewer({ code }) {
             </div>
           )}
 
-          {snap.sx && <ViewerStats players={players} sx={snap.sx} pe={snap.pe} />}
+          {snap.sx && (
+            <div style={styles.card}>
+              <h2 style={styles.h2}>統計</h2>
+              <StatsBoard players={players} st={statsFromSnap(snap.sx, players.length)} potEnabled={snap.pe} />
+            </div>
+          )}
         </>
       )}
 
@@ -566,42 +575,19 @@ function SettlementCard({ players, totals, pot }) {
   );
 }
 
-function ViewerStats({ players, sx, pe }) {
-  const cols = [
-    { key: "d", label: "宣言" },
-    { key: "gb", label: "返され" },
-    { key: "db", label: "返し" },
-    ...(pe ? [{ key: "pw", label: "ポット" }] : []),
-  ];
-  return (
-    <div style={styles.card}>
-      <h2 style={styles.h2}>回数</h2>
-      {pe && (
-        <div style={{ fontSize: 12, color: "#666", marginBottom: 10 }}>
-          流局 {sx.dr}回 · ポット最高額 {sx.mp}
-        </div>
-      )}
-      <div style={{ display: "grid", gridTemplateColumns: `1fr repeat(${cols.length}, 52px)`, rowGap: 6, alignItems: "center" }}>
-        <span />
-        {cols.map((c) => (
-          <span key={c.key} style={{ fontSize: 11, color: "#999", fontWeight: 700, textAlign: "right" }}>
-            {c.label}
-          </span>
-        ))}
-        {players.map((p, i) => (
-          <React.Fragment key={i}>
-            <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 14, minWidth: 0 }}>
-              <Dot idx={i} size={8} />
-              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{p}</span>
-            </span>
-            {cols.map((c) => (
-              <span key={c.key} style={{ fontFamily: "monospace", fontSize: 14, fontWeight: 700, textAlign: "right" }}>
-                {(sx[c.key] && sx[c.key][i]) || 0}
-              </span>
-            ))}
-          </React.Fragment>
-        ))}
-      </div>
-    </div>
-  );
+// 送られてきた統計を試合側と同じ形に戻す（古い形式で届いた項目は0）
+function statsFromSnap(sx, n) {
+  const z = Array(n).fill(0);
+  const arr = (v) => (Array.isArray(v) ? v : z);
+  return {
+    declared: arr(sx.d),
+    gotBacked: arr(sx.gb),
+    didBack: arr(sx.db),
+    gained: arr(sx.g),
+    lost: arr(sx.l),
+    potWins: arr(sx.pw),
+    potGained: arr(sx.pg),
+    draws: sx.dr || 0,
+    maxPot: sx.mp || 0,
+  };
 }

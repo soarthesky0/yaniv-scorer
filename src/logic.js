@@ -212,6 +212,7 @@ export function computeStats(players, rounds) {
     gained: zeros(n),
     lost: zeros(n),
     potWins: zeros(n),
+    potGained: zeros(n),
     draws: 0,
     maxPot: 0,
   };
@@ -224,7 +225,10 @@ export function computeStats(players, rounds) {
     if (r.type === "draw") st.draws++;
     st.maxPot = Math.max(st.maxPot, r.potAfter || 0, r.potBefore || 0);
     (r.potOut || []).forEach((v, i) => {
-      if (v > 0) st.potWins[i]++;
+      if (v > 0) {
+        st.potWins[i]++;
+        st.potGained[i] += v;
+      }
     });
     r.deltas.forEach((d, i) => {
       if (d > 0) st.gained[i] += d;
@@ -232,6 +236,23 @@ export function computeStats(players, rounds) {
     });
   });
   return st;
+}
+
+// 次のラウンドで最初に出す人：直前のラウンドで一番多く支払った人（ポットへの支払いも含む）
+// 同額で並んだらじゃんけん。誰も払っていなければ全員でじゃんけん
+// 返り値: { who: [番号...], amount, all: 誰も払っていない }
+export function nextStarter(round, playerCount) {
+  if (!round) return null;
+  const paid = zeros(playerCount);
+  (round.transfers || []).forEach((t) => {
+    if (t.from < playerCount) paid[t.from] += t.points;
+  });
+  (round.potIn || []).forEach((v, i) => {
+    if (i < playerCount) paid[i] += v;
+  });
+  const max = Math.max(0, ...paid);
+  if (max === 0) return { who: paid.map((_, i) => i), amount: 0, all: true };
+  return { who: paid.map((v, i) => (v === max ? i : -1)).filter((i) => i >= 0), amount: max, all: false };
 }
 
 export function describeRound(r, players) {

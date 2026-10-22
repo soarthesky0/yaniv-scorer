@@ -21,6 +21,7 @@ import {
   computeSettlement,
   activeDouble,
   nextDoubleRound,
+  nextStarter,
   computeStats,
   describeRound,
   buildCsv,
@@ -1154,6 +1155,10 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, 
         )}
       </div>
 
+      {rounds.length > 0 && (
+        <NextStarter players={players} info={nextStarter(rounds[rounds.length - 1], players.length)} prevRound={rounds.length} />
+      )}
+
       {/* 倍マッチ通知 */}
       {double && !double.announced && (
         <div style={styles.doubleAlert}>
@@ -1793,9 +1798,45 @@ export function ScoreChart({ players, data, rounds = [], showPot, height, xDomai
   );
 }
 
+// ============ 次に最初に出す人 ============
+export function NextStarter({ players, info, prevRound }) {
+  if (!info) return null;
+  const names = info.who.map((i) => players[i]).filter(Boolean);
+  let main;
+  let sub;
+  if (info.all) {
+    main = "全員でじゃんけん";
+    sub = `R${prevRound}は誰も払っていません`;
+  } else if (names.length === 1) {
+    main = names[0];
+    sub = `R${prevRound}で一番多く払った人（${info.amount}点）`;
+  } else {
+    main = `${names.join("・")}でじゃんけん`;
+    sub = `R${prevRound}で同じ${info.amount}点ずつ払った`;
+  }
+  const single = !info.all && names.length === 1;
+  return (
+    <div style={{ ...styles.card, display: "flex", alignItems: "center", gap: 12, padding: "12px 16px" }}>
+      <span style={{ ...styles.miniLabel, whiteSpace: "nowrap" }}>次に始める人</span>
+      <span style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0, flex: 1 }}>
+        {single && <Dot idx={info.who[0]} size={12} />}
+        <span style={{ minWidth: 0 }}>
+          <span style={{ display: "block", fontSize: 18, fontWeight: 900 }}>{main}</span>
+          <span style={{ display: "block", fontSize: 11, color: "#999" }}>{sub}</span>
+        </span>
+      </span>
+    </div>
+  );
+}
+
 // ============ 統計 ============
 function StatsView({ players, rounds, potEnabled }) {
   const st = useMemo(() => computeStats(players, rounds), [players, rounds]);
+  return <StatsBoard players={players} st={st} potEnabled={potEnabled} />;
+}
+
+// 統計の表示部分（試合側と閲覧側で共通）。st は computeStats の結果と同じ形
+export function StatsBoard({ players, st, potEnabled }) {
   const hasPot = potEnabled || st.draws > 0 || st.potWins.some((v) => v > 0);
   const cats = [
     { key: "declared", label: "宣言回数" },
@@ -1803,11 +1844,17 @@ function StatsView({ players, rounds, potEnabled }) {
     { key: "didBack", label: "返した" },
     { key: "gained", label: "得点合計" },
     { key: "lost", label: "失点合計" },
-    ...(hasPot ? [{ key: "potWins", label: "ポット獲得" }] : []),
+    ...(hasPot
+      ? [
+          { key: "potWins", label: "ポット獲得回数" },
+          { key: "potGained", label: "ポット獲得点" },
+        ]
+      : []),
   ];
   const [cat, setCat] = useState("declared");
   const values = st[cat] || st.declared;
-  const list = players.map((name, idx) => ({ name, idx, v: values[idx] })).sort((a, b) => b.v - a.v);
+  const zero = players.map(() => 0);
+  const list = players.map((name, idx) => ({ name, idx, v: (values || zero)[idx] || 0 })).sort((a, b) => b.v - a.v);
   const max = Math.max(1, ...list.map((x) => x.v));
 
   // 同率順位

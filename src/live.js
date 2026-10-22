@@ -7,6 +7,7 @@ import {
   currentPot,
   activeDouble,
   nextDoubleRound,
+  nextStarter,
 } from "./logic.js";
 
 export const LIVE_BASE = (import.meta.env && import.meta.env.VITE_LIVE_BASE) || "https://ntfy.sh";
@@ -85,7 +86,7 @@ export function buildSnapshot(current, { ended = false } = {}) {
     // 直近のラウンド（新しい順）：[番号, 倍率, 見出し, 点の動き]
     lr: rounds
       .map((r, i) => ({ r, i }))
-      .slice(-6)
+      .slice(-5)
       .reverse()
       .map(({ r, i }) => {
         const d = describeRound(r, players);
@@ -98,7 +99,22 @@ export function buildSnapshot(current, { ended = false } = {}) {
       y: cum.series.map((p) => players.map((n) => p[n])),
       pot: cum.series.map((p) => p["ポット"] || 0),
     },
-    sx: { d: st.declared, gb: st.gotBacked, db: st.didBack, pw: st.potWins, dr: st.draws, mp: st.maxPot },
+    sx: {
+      d: st.declared,
+      gb: st.gotBacked,
+      db: st.didBack,
+      g: st.gained,
+      l: st.lost,
+      pw: st.potWins,
+      pg: st.potGained,
+      dr: st.draws,
+      mp: st.maxPot,
+    },
+    // 次に最初に出す人：[番号...]、支払額、誰も払っていないか
+    ns: (() => {
+      const n = nextStarter(last, players.length);
+      return n ? { w: n.who, a: n.amount, all: n.all } : null;
+    })(),
   };
 }
 
@@ -112,26 +128,26 @@ function thinSeries(se, step) {
   };
 }
 
-// 4KBに収まるまで、推移の間引き→直近ラウンドの削減→推移の省略の順で軽くする
+// 4KBに収まるまで軽くする。グラフの点をなるべく残したいので、
+// ①グラフを少し間引く → ②直近ラウンドの文章を減らす → ③グラフを大きく間引く → ④グラフを省く の順
 export function encodeSnapshot(snap) {
-  let s = { ...snap };
-  let out = JSON.stringify(s);
-  if (byteLength(out) <= MAX_BYTES) return out;
-  for (const step of [2, 3, 4, 6, 8, 12, 16, 24, 32]) {
-    s = { ...snap, se: thinSeries(snap.se, step) };
-    out = JSON.stringify(s);
-    if (byteLength(out) <= MAX_BYTES) return out;
+  const fits = (o) => {
+    const out = JSON.stringify(o);
+    return byteLength(out) <= MAX_BYTES ? out : null;
+  };
+  const plans = [];
+  for (const step of [1, 2, 3, 4]) plans.push({ lr: 5, step });
+  for (const lr of [3, 1]) for (const step of [2, 3, 4, 6, 8]) plans.push({ lr, step });
+  for (const step of [12, 16, 24, 32, 48]) plans.push({ lr: 1, step });
+  for (const p of plans) {
+    const out = fits({
+      ...snap,
+      lr: snap.lr.slice(0, p.lr),
+      se: p.step === 1 || !snap.se ? snap.se : thinSeries(snap.se, p.step),
+    });
+    if (out) return out;
   }
-  for (const n of [3, 1]) {
-    s = { ...s, lr: snap.lr.slice(0, n) };
-    out = JSON.stringify(s);
-    if (byteLength(out) <= MAX_BYTES) return out;
-  }
-  s = { ...s, se: null, mk: "" };
-  out = JSON.stringify(s);
-  if (byteLength(out) <= MAX_BYTES) return out;
-  s = { ...s, lr: [] };
-  return JSON.stringify(s);
+  return fits({ ...snap, lr: snap.lr.slice(0, 1), se: null, mk: "" }) || JSON.stringify({ ...snap, lr: [], se: null, mk: "" });
 }
 
 export function decodeSnapshot(text) {
