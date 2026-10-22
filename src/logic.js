@@ -75,9 +75,11 @@ export function computeRound(input, playerCount, potBefore, settings) {
     const hands = input.hands || [];
     if (hands.length !== playerCount || hands.some((h) => h === "" || Number.isNaN(Number(h))))
       return fail("全員の手札合計を入力してください");
+    // 各自がポットに入れるのは「手札合計−宣言ライン」（マイナスなら0）
+    const line = Number(s.declareLine ?? 5);
     const factor = s.potRate * (mult > 1 && s.multiplyPotIn ? mult : 1);
     hands.forEach((h, i) => {
-      potIn[i] = Number(h) * factor;
+      potIn[i] = Math.max(0, Number(h) - line) * factor;
     });
     potAfter = potBefore + potIn.reduce((a, b) => a + b, 0);
   } else if (input.type === "manual") {

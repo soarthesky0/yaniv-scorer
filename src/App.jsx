@@ -691,7 +691,7 @@ function SettingsFields({ settings, onChange, inGame }) {
             </div>
             <Toggle
               label="倍マッチの流局で支払いにも倍率"
-              note="オンだと手札合計×倍率をポットへ"
+              note="オンだと（手札合計−宣言ライン）×倍率をポットへ"
               value={s.multiplyPotIn}
               onChange={(v) => onChange({ multiplyPotIn: v })}
             />
@@ -712,7 +712,9 @@ function SettingsFields({ settings, onChange, inGame }) {
       </div>
 
       <div style={{ borderTop: "1px solid #eee", paddingTop: 16, display: "grid", gap: 14 }}>
-        <div style={{ fontSize: 11, color: "#999" }}>以下はルール解説の表示用（点数計算には影響しません）</div>
+        <div style={{ fontSize: 11, color: "#999" }}>
+          宣言ラインは流局ポットの支払い（手札合計−宣言ライン）にも使います。デッキ数はルール解説の表示用です
+        </div>
         <div>
           <label style={styles.label}>宣言ライン</label>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1074,7 +1076,7 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, 
             targetHand: Number(input.targetHand),
           }
         : {}),
-      ...(input.type === "draw" ? { hands: input.hands.map(Number) } : {}),
+      ...(input.type === "draw" ? { hands: input.hands.map(Number), declareLine: Number(settings.declareLine ?? 5) } : {}),
       transfers: result.transfers,
       potIn: result.potIn,
       potOut: result.potOut,
@@ -1400,6 +1402,9 @@ function RoundInput({ players, input, setInput, result, pot, settings, double, o
       {input.type === "draw" && (
         <div style={{ marginTop: 18 }}>
           <label style={styles.label}>全員の手札合計</label>
+          <div style={{ fontSize: 12, color: "#666", marginTop: -4, marginBottom: 10 }}>
+            ポットに入るのは「手札合計−{settings.declareLine ?? 5}」点（宣言ライン以下の人は0点）
+          </div>
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
             {players.map((p, i) => (
               <div

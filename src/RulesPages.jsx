@@ -237,53 +237,74 @@ function FlowFigure({ players, arrows, height = 150, caption }) {
   );
 }
 
-function PotFigure() {
+export const POT_EXAMPLE_HANDS = [12, 8, 20, 5, 15];
+export const potPay = (hand, line) => Math.max(0, hand - line);
+
+function PotFigure({ line }) {
   const id = useId().replace(/:/g, "");
-  const hands = [12, 8, 20, 5, 15];
+  const hands = POT_EXAMPLE_HANDS;
+  const pays = hands.map((h) => potPay(h, line));
+  const total = pays.reduce((a, b) => a + b, 0);
   const names = ["A", "B", "C", "D", "E"];
   const bw = 54;
   const x0 = (340 - (5 * bw + 4 * 8)) / 2;
   return (
-    <Figure height={268} caption="流局のたびにポットが積み上がり、次にヤニブが成功した人（返しなら返した人）が総取りする">
+    <Figure
+      height={282}
+      caption={`手札合計から宣言ライン${line}点を引いた分だけ払う（${line}点以下の人は0点）。流局のたびにポットが積み上がり、次にヤニブが成功した人（返しなら返した人）が総取りする`}
+    >
       <ArrowDefs id={`p${id}`} color={C.ink} />
       <text x={170} y={18} fontSize={12} fontWeight={700} fill={C.sub} textAnchor="middle">
-        山札が尽きて流局 → 全員の手札合計をポットへ
+        流局 → 各自「手札合計−{line}」をポットへ
       </text>
       {hands.map((h, i) => {
         const x = x0 + i * (bw + 8);
+        const pay = pays[i];
         return (
           <g key={i}>
-            <rect x={x} y={30} width={bw} height={46} rx={8} fill="#fff" stroke="#cfc9bb" />
-            <text x={x + bw / 2} y={46} fontSize={11} fontWeight={700} fill={C.sub} textAnchor="middle">
+            <rect x={x} y={30} width={bw} height={60} rx={8} fill="#fff" stroke="#cfc9bb" />
+            <text x={x + bw / 2} y={45} fontSize={11} fontWeight={700} fill={C.sub} textAnchor="middle">
               {names[i]}
             </text>
-            <text x={x + bw / 2} y={68} fontSize={16} fontWeight={900} fill={C.red} textAnchor="middle">
-              −{h}
+            <text x={x + bw / 2} y={60} fontSize={10} fill={C.faint} textAnchor="middle">
+              手札{h}
             </text>
-            <path
-              d={`M${x + bw / 2} 80 Q ${x + bw / 2} 104 ${170 + (i - 2) * 10} 116`}
-              fill="none"
-              stroke={C.ink}
-              strokeWidth={1.5}
-              markerEnd={`url(#p${id})`}
-            />
+            <text
+              x={x + bw / 2}
+              y={81}
+              fontSize={16}
+              fontWeight={900}
+              fill={pay > 0 ? C.red : C.faint}
+              textAnchor="middle"
+            >
+              {pay > 0 ? `−${pay}` : "0"}
+            </text>
+            {pay > 0 && (
+              <path
+                d={`M${x + bw / 2} 94 Q ${x + bw / 2} 116 ${170 + (i - 2) * 10} 128`}
+                fill="none"
+                stroke={C.ink}
+                strokeWidth={1.5}
+                markerEnd={`url(#p${id})`}
+              />
+            )}
           </g>
         );
       })}
-      <rect x={110} y={120} width={120} height={50} rx={25} fill={C.ink} />
-      <text x={170} y={140} fontSize={11} fontWeight={700} fill="#b9b4a6" textAnchor="middle">
+      <rect x={110} y={132} width={120} height={50} rx={25} fill={C.ink} />
+      <text x={170} y={152} fontSize={11} fontWeight={700} fill="#b9b4a6" textAnchor="middle">
         POT
       </text>
-      <text x={170} y={161} fontSize={20} fontWeight={900} fill="#fff" textAnchor="middle">
-        60
+      <text x={170} y={173} fontSize={20} fontWeight={900} fill="#fff" textAnchor="middle">
+        {total}
       </text>
-      <path d="M170 174 L170 204" stroke={C.ink} strokeWidth={2} markerEnd={`url(#p${id})`} />
-      <text x={186} y={194} fontSize={11} fill={C.sub}>
+      <path d="M170 186 L170 216" stroke={C.ink} strokeWidth={2} markerEnd={`url(#p${id})`} />
+      <text x={186} y={206} fontSize={11} fill={C.sub}>
         次のラウンドへ持ち越し
       </text>
-      <rect x={60} y={210} width={220} height={40} rx={8} fill="#fff" stroke={C.green} strokeWidth={2} />
-      <text x={170} y={235} fontSize={13} fontWeight={800} fill={C.green} textAnchor="middle">
-        ヤニブ成功者が ＋60 総取り
+      <rect x={60} y={222} width={220} height={40} rx={8} fill="#fff" stroke={C.green} strokeWidth={2} />
+      <text x={170} y={247} fontSize={13} fontWeight={800} fill={C.green} textAnchor="middle">
+        ヤニブ成功者が ＋{total} 総取り
       </text>
     </Figure>
   );
@@ -363,7 +384,7 @@ function Badge({ children, color = C.ink }) {
 // ============ ルール解説 ============
 function RulesPage({ settings }) {
   const s = settings;
-  const line = s.declareLine || 5;
+  const line = s.declareLine ?? 5;
   const decks = s.deckCount || 1;
   return (
     <div style={{ display: "grid", gap: 10 }}>
@@ -461,11 +482,13 @@ function RulesPage({ settings }) {
           <Bullets
             items={[
               "山札が尽きたら再シャッフルせず流局。点数の移動はなし",
-              "全員が自分の手札合計点をポットに入れる。ポットは次のラウンドに持ち越し",
+              `全員が「手札合計−宣言ライン（${line}点）」をポットに入れる。マイナスになる人は0点`,
+              `例：手札12点の人は${potPay(12, line)}点、手札4点の人は${potPay(4, line)}点を入れる`,
+              "ポットは次のラウンドに持ち越し",
               "次にヤニブが成功した人が総取り。ヤニブ返しなら返した人が総取り（並んだら山分け）",
             ]}
           />
-          <PotFigure />
+          <PotFigure line={line} />
         </Section>
       ) : (
         <Section title="山札が尽きたら" accent={C.amber}>
@@ -505,7 +528,6 @@ const EXAMPLES = [
     result: "2人にそれぞれ40点、計80点 払う",
   },
   { tag: "倍マッチ", color: C.amber, cond: "上の全部", result: "点数移動がすべて2倍" },
-  { tag: "流局", color: "#6b675c", cond: "手札が 12・8・20・5・15点", result: "ポットに計60点が入る" },
 ];
 
 const PLAYER_TABLE = [
@@ -535,12 +557,23 @@ const PLAYER_TABLE = [
   },
 ];
 
-function QuickPage({ playerCount }) {
+function QuickPage({ playerCount, settings = {} }) {
+  const line = settings.declareLine ?? 5;
+  const pays = POT_EXAMPLE_HANDS.map((h) => potPay(h, line));
+  const examples = [
+    ...EXAMPLES,
+    {
+      tag: "流局",
+      color: "#6b675c",
+      cond: `宣言ライン${line}点、手札が ${POT_EXAMPLE_HANDS.join("・")}点`,
+      result: `各自「手札−${line}」で ${pays.join("＋")}＝計${pays.reduce((a, b) => a + b, 0)}点 がポットへ`,
+    },
+  ];
   return (
     <div style={{ display: "grid", gap: 10 }}>
       <Section title="点数計算の早見表" defaultOpen accent={C.red}>
         <div style={{ display: "grid", gap: 8 }}>
-          {EXAMPLES.map((e, i) => (
+          {examples.map((e, i) => (
             <div key={i} style={{ background: C.paper, borderRadius: 8, padding: "10px 12px" }}>
               <div style={{ fontSize: 13, color: C.sub }}>
                 <Badge color={e.color}>{e.tag}</Badge>
@@ -680,7 +713,7 @@ export function RulesSheet({ tab, setTab, settings, playerCount, onClose }) {
             padding: "14px 16px calc(env(safe-area-inset-bottom, 0px) + 32px)",
           }}
         >
-          {tab === "rules" ? <RulesPage settings={settings} /> : <QuickPage playerCount={playerCount} />}
+          {tab === "rules" ? <RulesPage settings={settings} /> : <QuickPage playerCount={playerCount} settings={settings} />}
         </div>
       </div>
     </div>
