@@ -1239,7 +1239,7 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, 
       </div>
 
       {rounds.length > 0 && (
-        <Collapsible title="推移" open={chartOpen} setOpen={setChartOpen}>
+        <Collapsible title="推移" open={chartOpen} setOpen={setChartOpen} className="bleed">
           <ScoreChart players={players} data={cumulative.series} rounds={rounds} showPot={settings.potEnabled} height={240} />
         </Collapsible>
       )}
@@ -1283,9 +1283,9 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, 
   );
 }
 
-function Collapsible({ title, open, setOpen, children }) {
+function Collapsible({ title, open, setOpen, children, className }) {
   return (
-    <div style={styles.card}>
+    <div style={styles.card} className={className}>
       <div
         style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: open ? 12 : 0 }}
       >
@@ -1634,6 +1634,17 @@ const MARKS = [
 ];
 
 export function ScoreChart({ players, data, rounds = [], showPot, height, xDomain, yDomain, yTicks }) {
+  // 幅に合わせて高さも伸ばす（スマホは指定の高さ、iPadなど横幅が広いときは幅の約4割）
+  const boxRef = useRef(null);
+  const [boxWidth, setBoxWidth] = useState(0);
+  useEffect(() => {
+    const el = boxRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver((entries) => setBoxWidth(entries[0].contentRect.width));
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const chartHeight = boxWidth > 560 ? Math.round(Math.min(640, Math.max(height, boxWidth * 0.42))) : height;
   const [focus, setFocus] = useState([]);
   const [marks, setMarks] = useState({ back: true, draw: false, mult: false });
   const lastRound = data.length ? data[data.length - 1].round : 0;
@@ -1711,7 +1722,7 @@ export function ScoreChart({ players, data, rounds = [], showPot, height, xDomai
         </div>
       )}
 
-      <div style={{ width: "100%", height }}>
+      <div ref={boxRef} style={{ width: "100%", height: chartHeight }}>
         <ResponsiveContainer>
           <LineChart data={data} margin={{ top: 6, right: 8, left: 0, bottom: 0 }}>
             <CartesianGrid stroke="#eee" />
@@ -1930,6 +1941,10 @@ function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, o
       pixelRatio: 2,
       cacheBust: true,
     };
+    // 横長の画面でもグラフだけ画面幅に広げているので、画像はスマホと同じ幅で作る
+    const el = shareRef.current;
+    el.classList.add("no-bleed");
+    await new Promise((r) => setTimeout(r, 250));
     try {
       // Safariは1回目の描画が欠けることがあるので、2回描画して2回目を使う
       await toBlob(shareRef.current, opts).catch(() => null);
@@ -1941,6 +1956,7 @@ function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, o
     } catch {
       alert("画像の作成に失敗しました。もう一度試してください。");
     } finally {
+      el.classList.remove("no-bleed");
       setShotBusy(false);
     }
   };
@@ -2045,7 +2061,7 @@ function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, o
           </p>
         </div>
 
-        <div style={styles.card}>
+        <div style={styles.card} className="bleed">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
             <h2 style={{ ...styles.h2, margin: 0 }}>累計点の推移</h2>
             <span style={{ fontSize: 12, color: "#999", fontFamily: "monospace" }}>

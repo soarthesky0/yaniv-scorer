@@ -45,3 +45,19 @@ button:disabled {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.25; }
 }
+
+/* グラフのカードだけ、横幅の広い画面（iPad・横向き）では画面いっぱいに広げる。
+   スマホでは計算結果が0になり、見た目は変わらない */
+.bleed {
+  --bleed: min(0px, max(calc(50% - 50vw + max(16px, env(safe-area-inset-left, 0px))), calc(50% - 720px)));
+  margin-left: var(--bleed);
+  margin-right: var(--bleed);
+}
+.no-bleed .bleed {
+  margin-left: 0;
+  margin-right: 0;
+}
+html,
+body {
+  overflow-x: hidden;
+}

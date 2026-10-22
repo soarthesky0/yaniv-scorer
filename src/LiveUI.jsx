@@ -501,7 +501,7 @@ export function LiveViewer({ code }) {
           )}
 
           {series.length > 1 && (
-            <div style={styles.card}>
+            <div style={styles.card} className="bleed">
               <h2 style={styles.h2}>推移</h2>
               <ScoreChart players={players} data={series} rounds={markRounds} showPot={snap.pe} height={240} />
             </div>
