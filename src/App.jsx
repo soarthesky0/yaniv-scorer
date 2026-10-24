@@ -29,6 +29,8 @@ import {
 import { RulesSheet, RulesFab, recommendFor } from "./RulesPages.jsx";
 import { LiveBar, LiveSheet, useLivePublisher } from "./LiveUI.jsx";
 import { newRoomCode, normalizeCode, isValidCode } from "./live.js";
+import { foldSession, sessionGame, eventsFromGame, makeEvent, newId } from "./session.js";
+import { SessionAssign, SessionPlay, SessionResult } from "./SessionUI.jsx";
 
 // 参加順に割り当てる色。先頭から何色取っても互いの差（色差ΔE）が最大になるように並べてある
 // （2人:124 / 4人:73 / 7人:50 / 12人:33）
@@ -102,6 +104,9 @@ function parseStore(parsed) {
       parsed.live && isValidCode(parsed.live.code)
         ? { code: parsed.live.code, on: !!parsed.live.on }
         : { code: null, on: false },
+    // 複数卓セッション：{ [id]: { events, view, table } }
+    sessions: parsed.sessions && typeof parsed.sessions === "object" ? parsed.sessions : {},
+    activeSid: parsed.activeSid || null,
   };
 }
 
@@ -172,6 +177,13 @@ export default function App() {
   const [lastSettings, setLastSettings] = useState(initial.lastSettings);
   const [view, setView] = useState({ type: "main" });
   const [rulesTab, setRulesTab] = useState(null); // null | "rules" | "quick"
+
+  // ===== 複数卓セッション =====
+  const [sessions, setSessions] = useState(initial.sessions);
+  const [activeSid, setActiveSid] = useState(initial.sessions[initial.activeSid] ? initial.activeSid : null);
+  const sess = activeSid ? sessions[activeSid] : null;
+  const S = useMemo(() => (sess && sess.events.length ? foldSession(sess.events) : null), [sess && sess.events]);
+  const sGame = useMemo(() => (S ? sessionGame(S) : null), [S]);
   // 過去に出た名前（多い順、同数なら最近の順）
   const knownNames = useMemo(() => {
     const count = {};
@@ -185,7 +197,13 @@ export default function App() {
     return Object.keys(count).sort((a, b) => count[b] - count[a] || recent[a] - recent[b]);
   }, [history]);
   const lastMembers = history[0]?.players || null;
-  const rulesPlayerCount = current.phase === "setup" ? current.numPlayers : current.players.length;
+  const sessTable = S && S.blocks.length ? S.blocks[S.blocks.length - 1].tables.find((t) => t.id === sess.table) || S.blocks[S.blocks.length - 1].tables[0] : null;
+  const rulesPlayerCount = sessTable
+    ? sessTable.pids.length
+    : current.phase === "setup"
+      ? current.numPlayers
+      : current.players.length;
+  const rulesSettings = S ? { ...S.settings, ...(sessTable ? sessTable.set : {}) } : current.settings;
   const wrap = (screen) => (
     <>
       {screen}
@@ -220,7 +238,7 @@ export default function App() {
         <RulesSheet
           tab={rulesTab}
           setTab={setRulesTab}
-          settings={current.settings}
+          settings={rulesSettings}
           playerCount={rulesPlayerCount}
           onClose={() => setRulesTab(null)}
         />
@@ -230,12 +248,15 @@ export default function App() {
 
   useEffect(() => {
     try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify({ current, history, trash, lastSettings, lastBackupAt, live }));
+      localStorage.setItem(
+        STORAGE_KEY,
+        JSON.stringify({ current, history, trash, lastSettings, lastBackupAt, live, sessions, activeSid })
+      );
     } catch {}
-  }, [current, history, trash, lastSettings, lastBackupAt, live]);
+  }, [current, history, trash, lastSettings, lastBackupAt, live, sessions, activeSid]);
 
   // ===== ライブ共有 =====
-  const { status: liveStatus, sendEnd } = useLivePublisher(live, current);
+  const { status: liveStatus, sendEnd } = useLivePublisher(live, sGame || current);
   const startLive = () => setLive({ code: live.code || newRoomCode(), on: true });
   const stopLive = async () => {
     if (!confirm("ライブ共有をやめる？見ている人の画面は「終了しました」になります")) return;
@@ -258,7 +279,7 @@ export default function App() {
       app: "yaniv-scorer",
       version: 1,
       exportedAt: now.toISOString(),
-      data: { current, history, trash, lastSettings },
+      data: { current, history, trash, lastSettings, sessions, activeSid },
     };
     const blob = new Blob([JSON.stringify(payload)], { type: "application/json" });
     const res = await shareOrDownload(blob, `yaniv_backup_${stampOf(now)}.json`, "application/json");
@@ -295,6 +316,14 @@ export default function App() {
     const trashIds = new Set([...trash.map((t) => t.id), ...history.map((h) => h.id), ...added.map((h) => h.id)]);
     setTrash((prev) => [...prev, ...parsed.trash.filter((t) => !trashIds.has(t.id))]);
     if (takeCurrent) setCurrent(parsed.current);
+    setSessions((prev) => {
+      const next = { ...prev };
+      Object.entries(parsed.sessions || {}).forEach(([id, v]) => {
+        if (!next[id]) next[id] = v;
+      });
+      return next;
+    });
+    if (!activeSid && parsed.activeSid && !history.some((h) => h.id === parsed.activeSid)) setActiveSid(parsed.activeSid);
     showToast({ text: `${added.length}試合を読み込みました` });
   };
 
@@ -383,6 +412,10 @@ export default function App() {
   const resumeGame = (id) => {
     const entry = history.find((h) => h.id === id);
     if (!entry) return;
+    if (entry.kind === "session") {
+      resumeSession(entry);
+      return;
+    }
     if (current.rounds.length > 0 && current.phase !== "result" && current.startedAt !== entry.startedAt) {
       if (!confirm("進行中のゲームを破棄してこの試合を再開する？")) return;
     }
@@ -397,6 +430,107 @@ export default function App() {
       doubleLog: entry.doubleLog || {},
       joinedAt: entry.players.map((_, i) => (entry.joinedAt && entry.joinedAt[i]) || 0),
     });
+    setView({ type: "main" });
+  };
+
+  // ----- セッションの操作 -----
+  const patchSess = (sid, fn) =>
+    setSessions((prev) => (prev[sid] ? { ...prev, [sid]: { ...prev[sid], ...fn(prev[sid]) } } : prev));
+  const emit = (...evs) => patchSess(activeSid, (p) => ({ events: [...p.events, ...evs] }));
+  const setSessView = (v) => patchSess(activeSid, () => ({ view: v }));
+
+  const sessionEntry = (SS, events) => {
+    const g = sessionGame(SS);
+    const totals = g.players.map(() => 0);
+    g.rounds.forEach((r) => r.deltas.forEach((d, i) => (totals[i] += d)));
+    const ranked = computeRanked(g.players, totals);
+    return {
+      ...g,
+      id: SS.id,
+      kind: "session",
+      events,
+      startedAt: g.startedAt || new Date().toISOString(),
+      finishedAt: g.finishedAt || new Date().toISOString(),
+      winner: ranked[0]?.name || "",
+      winnerScore: ranked[0]?.score ?? 0,
+    };
+  };
+  const upsertSessionHistory = (SS, events) => {
+    if (!SS || !SS.id) return;
+    const entry = sessionEntry(SS, events);
+    setHistory((prev) => [entry, ...prev.filter((h) => h.id !== entry.id)]);
+  };
+
+  const openNewSession = () => {
+    const sid = newId(12);
+    setSessions((prev) => ({
+      ...prev,
+      [sid]: { events: [], view: "assign", draftNames: current.nameInputs.slice(0, current.numPlayers) },
+    }));
+    setActiveSid(sid);
+  };
+
+  const switchToMulti = () => {
+    if (!confirm("今の試合を「区切り1」として、複数卓のセッションに切り替える？\n点数はそのまま引き継がれます")) return;
+    const { sid, events } = eventsFromGame(current);
+    setSessions((prev) => ({ ...prev, [sid]: { events, view: "assign" } }));
+    setActiveSid(sid);
+    setCurrent({ ...emptyCurrent(lastSettings), numPlayers: current.numPlayers, nameInputs: current.nameInputs });
+  };
+
+  const startBlock = ({ addRoster, tables, settings }) => {
+    const evs = [];
+    if (!S) {
+      evs.push(makeEvent("init", { sid: activeSid, roster: addRoster, settings: { ...lastSettings, ...settings } }));
+    } else {
+      if (addRoster.length) evs.push(makeEvent("roster", { add: addRoster }));
+      const changed = Object.fromEntries(Object.entries(settings).filter(([k, v]) => S.settings[k] !== v));
+      if (Object.keys(changed).length) evs.push(makeEvent("settings", { patch: changed }));
+    }
+    evs.push(makeEvent("block", { tables }));
+    patchSess(activeSid, (p) => ({ events: [...p.events, ...evs], view: "play", table: tables[0].id }));
+  };
+
+  const cancelAssign = () => {
+    if (!S) {
+      const sid = activeSid;
+      setActiveSid(null);
+      setSessions((prev) => {
+        const next = { ...prev };
+        delete next[sid];
+        return next;
+      });
+      return;
+    }
+    if (S.blocks.length) setSessView("play");
+  };
+
+  const showSessionResult = () => {
+    upsertSessionHistory(S, sess.events);
+    setSessView("result");
+  };
+
+  const endSession = () => {
+    if (!confirm("セッションを終える？\n結果は履歴に保存されます（あとで再開もできます）")) return;
+    const events = [...sess.events, makeEvent("end", {})];
+    const SS = foldSession(events);
+    upsertSessionHistory(SS, events);
+    const sid = activeSid;
+    setActiveSid(null);
+    setSessions((prev) => {
+      const next = { ...prev };
+      delete next[sid];
+      return next;
+    });
+    setView({ type: "history-detail", id: sid });
+    showToast({ text: "セッションを履歴に保存しました" });
+  };
+
+  const resumeSession = (entry) => {
+    if (activeSid && !confirm("進行中のセッションを閉じて、このセッションを再開する？")) return;
+    const events = [...(entry.events || []), makeEvent("reopen", {})];
+    setSessions((prev) => ({ ...prev, [entry.id]: { events, view: "play" } }));
+    setActiveSid(entry.id);
     setView({ type: "main" });
   };
 
@@ -444,6 +578,41 @@ export default function App() {
     );
   }
 
+  if (sess) {
+    if (sess.view === "assign" || !S || !S.blocks.length) {
+      return wrap(
+        <SessionAssign
+          key={`assign-${activeSid}-${S ? S.blocks.length : 0}`}
+          S={S}
+          draftNames={sess.draftNames || []}
+          knownNames={knownNames}
+          lastMembers={lastMembers}
+          onStart={startBlock}
+          onCancel={cancelAssign}
+          onEnd={endSession}
+          onResult={showSessionResult}
+        />
+      );
+    }
+    if (sess.view === "result") {
+      return wrap(
+        <SessionResult S={S} onBack={() => setSessView("play")} onEnd={endSession} liveBar={liveBar} />
+      );
+    }
+    return wrap(
+      <SessionPlay
+        S={S}
+        tableId={sess.table}
+        setTableId={(t) => patchSess(activeSid, () => ({ table: t }))}
+        emit={emit}
+        onResult={showSessionResult}
+        onAssignNext={() => setSessView("assign")}
+        onEnd={endSession}
+        liveBar={liveBar}
+      />
+    );
+  }
+
   if (current.phase === "setup") {
     return wrap(
       <SetupScreen
@@ -457,6 +626,7 @@ export default function App() {
         knownNames={knownNames}
         lastMembers={lastMembers}
         liveBar={live.on ? liveBar : null}
+        onMulti={openNewSession}
       />
     );
   }
@@ -483,6 +653,7 @@ export default function App() {
       onNewGame={newGame}
       knownNames={knownNames}
       liveBar={liveBar}
+      onSwitchToMulti={switchToMulti}
     />
   );
 }
@@ -520,7 +691,7 @@ export function Dot({ idx, size = 10 }) {
   );
 }
 
-function Segmented({ options, value, onChange, small }) {
+export function Segmented({ options, value, onChange, small }) {
   return (
     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
       {options.map((o) => (
@@ -541,7 +712,7 @@ function Segmented({ options, value, onChange, small }) {
   );
 }
 
-function Toggle({ label, value, onChange, note }) {
+export function Toggle({ label, value, onChange, note }) {
   return (
     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12 }}>
       <div>
@@ -623,7 +794,7 @@ function NumInput({ value, onChange, placeholder = "手札", width = 76, autoFoc
   );
 }
 
-function NameChips({ names, onPick }) {
+export function NameChips({ names, onPick }) {
   return (
     <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
       {names.map((n) => (
@@ -641,27 +812,30 @@ function NameChips({ names, onPick }) {
 }
 
 // ============ 設定 ============
-function SettingsFields({ settings, onChange, inGame }) {
+export function SettingsFields({ settings, onChange, inGame, blockMode }) {
   const s = settings;
+  // blockMode：複数卓の区切りでは「周期」ではなく「区切りの長さ（最後のラウンドが倍マッチ）」を設定する
+  const key = blockMode ? "blockLength" : "doublePeriod";
+  const val = s[key] || 0;
   return (
     <div style={{ display: "grid", gap: 18 }}>
       <div>
-        <label style={styles.label}>倍マッチの周期</label>
+        <label style={styles.label}>{blockMode ? "区切りの長さ（最後のラウンドが倍マッチ）" : "倍マッチの周期"}</label>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <button
             style={styles.stepBtn}
-            onClick={() => onChange({ doublePeriod: Math.max(0, (s.doublePeriod || 0) - 1) })}
+            onClick={() => onChange({ [key]: Math.max(blockMode ? 1 : 0, val - 1) })}
           >
             −
           </button>
           <span style={{ fontSize: 18, fontWeight: 700, minWidth: 110, textAlign: "center" }}>
-            {s.doublePeriod > 0 ? `${s.doublePeriod}ラウンドごと` : "オフ"}
+            {blockMode ? `${val}ラウンド` : val > 0 ? `${val}ラウンドごと` : "オフ"}
           </span>
-          <button style={styles.stepBtn} onClick={() => onChange({ doublePeriod: (s.doublePeriod || 0) + 1 })}>
+          <button style={styles.stepBtn} onClick={() => onChange({ [key]: val + 1 })}>
             ＋
           </button>
         </div>
-        {inGame && (
+        {inGame && !blockMode && (
           <div style={{ fontSize: 11, color: "#999", marginTop: 6 }}>
             変更するとこの先の予定ラウンドが新しい周期で計算されます
           </div>
@@ -673,7 +847,7 @@ function SettingsFields({ settings, onChange, inGame }) {
           label="流局ポット"
           value={s.potEnabled}
           onChange={(v) => onChange({ potEnabled: v })}
-          note="山札が尽きたら流局、手札合計をポットへ"
+          note="山札が尽きたら流局、（手札合計−宣言ライン）をポットへ"
         />
         {s.potEnabled && (
           <>
@@ -745,7 +919,7 @@ function SettingsFields({ settings, onChange, inGame }) {
   );
 }
 
-function SettingsSheet({ settings, onChange, onClose }) {
+function SettingsSheet({ settings, onChange, onClose, extra, blockMode }) {
   return (
     <div
       onClick={onClose}
@@ -777,7 +951,8 @@ function SettingsSheet({ settings, onChange, onClose }) {
             閉じる
           </button>
         </div>
-        <SettingsFields settings={settings} onChange={onChange} inGame />
+        <SettingsFields settings={settings} onChange={onChange} inGame blockMode={blockMode} />
+        {extra && <div style={{ borderTop: "1px solid #eee", marginTop: 18, paddingTop: 16 }}>{extra}</div>}
       </div>
     </div>
   );
@@ -795,6 +970,7 @@ function SetupScreen({
   knownNames = [],
   lastMembers,
   liveBar,
+  onMulti,
 }) {
   const { numPlayers, nameInputs } = current;
   const rec = recommendFor(numPlayers);
@@ -973,6 +1149,12 @@ function SetupScreen({
       <button onClick={startGame} style={styles.primary}>
         ゲーム開始 →
       </button>
+
+      {onMulti && (
+        <button onClick={onMulti} style={{ ...styles.linkBtn, justifySelf: "center", fontSize: 13, color: "#888" }}>
+          複数卓で遊ぶ →
+        </button>
+      )}
     </Shell>
   );
 }
@@ -989,7 +1171,18 @@ const emptyInput = (n) => ({
   manualTransfers: [{ from: 0, to: 1, points: "" }],
 });
 
-function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, knownNames = [], liveBar }) {
+// sessionUi があれば複数卓セッションの卓として表示する（なければ今までどおりの1卓の試合）
+export function PlayScreen({
+  game,
+  updateCurrent,
+  updateSettings,
+  goResult,
+  onNewGame,
+  knownNames = [],
+  liveBar,
+  onSwitchToMulti,
+  sessionUi,
+}) {
   const { players, rounds, settings, doubleLog } = game;
   const joinedAt = game.joinedAt || [];
   const roundNo = rounds.length + 1;
@@ -1050,8 +1243,8 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, 
   const [statsOpen, setStatsOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
 
-  const double = activeDouble(roundNo, settings.doublePeriod, doubleLog);
-  const nextDouble = nextDoubleRound(roundNo, settings.doublePeriod, doubleLog);
+  const double = activeDouble(roundNo, settings.doublePeriod, doubleLog, !!game.doubleOnce);
+  const nextDouble = nextDoubleRound(roundNo, settings.doublePeriod, doubleLog, !!game.doubleOnce);
 
   const announce = () =>
     updateCurrent((prev) => ({
@@ -1112,20 +1305,28 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, 
   return (
     <Shell>
       <Header
-        title="YANIV"
+        title={sessionUi?.title || "YANIV"}
         right={
           <>
             <button onClick={() => setSettingsOpen(true)} style={styles.headerBtn}>
               設定
             </button>
-            <button onClick={onNewGame} style={styles.headerBtn}>
-              新規ゲーム
-            </button>
+            {sessionUi ? (
+              sessionUi.headerRight
+            ) : (
+              <button onClick={onNewGame} style={styles.headerBtn}>
+                新規ゲーム
+              </button>
+            )}
           </>
         }
       />
 
+      {sessionUi?.top}
+
       {liveBar}
+
+      {sessionUi?.banner}
 
       {/* ラウンド数・ポット */}
       <div style={{ ...styles.card, display: "flex", alignItems: "stretch", padding: 0, overflow: "hidden" }}>
@@ -1188,7 +1389,7 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, 
 
       {/* 累計 */}
       <div style={styles.card}>
-        <h2 style={styles.h2}>累計</h2>
+        <h2 style={styles.h2}>{sessionUi?.totalsTitle || "累計"}</h2>
         <div style={{ display: "grid", gap: 6 }}>
           {players.map((p, i) => (
             <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1208,7 +1409,8 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, 
             </div>
           ))}
         </div>
-        {players.length < MAX_PLAYERS &&
+        {!sessionUi &&
+          players.length < MAX_PLAYERS &&
           (joinOpen ? (
             <div style={{ marginTop: 14, borderTop: "1px solid #eee", paddingTop: 14 }}>
               <div style={{ display: "flex", gap: 8 }}>
@@ -1277,12 +1479,38 @@ function PlayScreen({ game, updateCurrent, updateSettings, goResult, onNewGame, 
         </Collapsible>
       )}
 
-      <button onClick={goResult} style={styles.primary} disabled={rounds.length === 0}>
-        結果を見る →
+      {sessionUi?.bottom}
+
+      <button
+        onClick={goResult}
+        style={styles.primary}
+        disabled={!sessionUi && rounds.length === 0}
+      >
+        {sessionUi?.resultLabel || "結果を見る →"}
       </button>
 
       {settingsOpen && (
-        <SettingsSheet settings={settings} onChange={updateSettings} onClose={() => setSettingsOpen(false)} />
+        <SettingsSheet
+          settings={settings}
+          onChange={updateSettings}
+          onClose={() => setSettingsOpen(false)}
+          blockMode={!!game.doubleOnce}
+          extra={
+            sessionUi
+              ? sessionUi.settingsExtra && sessionUi.settingsExtra(() => setSettingsOpen(false))
+              : onSwitchToMulti && (
+                  <button
+                    onClick={() => {
+                      setSettingsOpen(false);
+                      onSwitchToMulti();
+                    }}
+                    style={{ ...styles.linkBtn, fontSize: 14 }}
+                  >
+                    複数卓に切り替える →
+                  </button>
+                )
+          }
+        />
       )}
     </Shell>
   );
@@ -1989,7 +2217,7 @@ async function exportCsv(game) {
 }
 
 // ============ Result（現在ゲーム・履歴詳細の共通部分） ============
-function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, onResume }) {
+export function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, onResume, labels = {} }) {
   const { players, rounds, settings } = game;
   const joinedAt = game.joinedAt || [];
   const cumulative = useMemo(() => computeCumulative(players, rounds, joinedAt), [players, rounds, joinedAt]);
@@ -2225,17 +2453,17 @@ function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, o
         {mode === "current" && (
           <>
             <button onClick={onBackToPlay} style={styles.secondary}>
-              ← 試合に戻る（続行）
+              {labels.back || "← 試合に戻る（続行）"}
             </button>
             <button onClick={onNewGame} style={styles.danger}>
-              新規ゲームを始める
+              {labels.newGame || "新規ゲームを始める"}
             </button>
           </>
         )}
         {mode === "history" && (
           <>
             <button onClick={onResume} style={styles.secondary}>
-              ▶ この試合を再開する
+              {labels.resume || "▶ この試合を再開する"}
             </button>
             <button onClick={onBack} style={styles.secondary}>
               ← 履歴一覧に戻る
@@ -2366,6 +2594,7 @@ function HistoryCard({ h, onSelect, onDelete, footer }) {
   const mults = h.rounds.filter((r) => (r.multiplier || 1) > 1).length;
   const maxPot = h.rounds.reduce((m, r) => Math.max(m, r.potAfter || 0), 0);
   const chips = [
+    h.kind === "session" && { label: `複数卓 · ${h.blocks || 1}区切り`, color: "#1D3557" },
     backs > 0 && { label: `返し ${backs}`, color: "#E63946" },
     mults > 0 && { label: `倍マッチ ${mults}`, color: "#F4A261" },
     draws > 0 && { label: `流局 ${draws}`, color: "#6b675c" },
@@ -2766,7 +2995,13 @@ function HistoryDetailScreen({ entry, onBack, onResume }) {
         {formatDate(entry.finishedAt || entry.startedAt)} · {entry.rounds.length} rounds / {entry.players.length}{" "}
         players
       </p>
-      <ResultView game={entry} mode="history" onBack={onBack} onResume={onResume} />
+      <ResultView
+        game={entry}
+        mode="history"
+        onBack={onBack}
+        onResume={onResume}
+        labels={entry.kind === "session" ? { resume: "▶ このセッションを再開する" } : {}}
+      />
     </Shell>
   );
 }
@@ -2935,6 +3170,28 @@ export const styles = {
     alignItems: "center",
     justifyContent: "center",
     boxShadow: "0 6px 16px rgba(230,57,70,0.4)",
+  },
+  autoBtn: {
+    padding: "10px 4px",
+    border: "none",
+    boxShadow: "inset 0 0 0 1px #d4d0c4",
+    borderRadius: 8,
+    background: "#fff",
+    fontSize: 12,
+    fontWeight: 800,
+    color: "#1a1a1a",
+    lineHeight: 1.3,
+  },
+  miniStep: {
+    width: 30,
+    height: 30,
+    border: "none",
+    boxShadow: "inset 0 0 0 1px #d4d0c4",
+    borderRadius: 15,
+    background: "#fff",
+    fontSize: 16,
+    color: "#1a1a1a",
+    padding: 0,
   },
   homeLink: {
     display: "flex",

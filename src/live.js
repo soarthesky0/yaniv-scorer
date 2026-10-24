@@ -112,6 +112,7 @@ export function buildSnapshot(current, { ended = false } = {}) {
     },
     // 次に最初に出す人：[番号...]、支払額、誰も払っていないか
     ns: (() => {
+      if (current.kind === "session") return null; // 複数卓は卓ごとに違うので出さない
       const n = nextStarter(last, players.length);
       return n ? { w: n.who, a: n.amount, all: n.all } : null;
     })(),

@@ -15,6 +15,7 @@ export const ROUND_TYPE_LABEL = {
   back: "ヤニブ返し",
   draw: "流局",
   manual: "手入力",
+  refund: "ポット返金",
 };
 
 const zeros = (n) => Array(n).fill(0);
@@ -183,19 +184,27 @@ export function computeSettlement(totals) {
 
 // 倍マッチ: 今のラウンドで通知すべき倍マッチを返す
 // doubleLog: { [予定ラウンド]: { targetRound, announced } }
-export function activeDouble(roundNo, period, doubleLog) {
+// once=true のときは周期の最初の1回（＝複数卓の区切りの最後のラウンド）だけを倍マッチにする
+export function activeDouble(roundNo, period, doubleLog, once = false) {
   const log = doubleLog || {};
   for (const [s, v] of Object.entries(log)) {
+    if (once && Number(s) !== period) continue;
     if (v.targetRound === roundNo) return { scheduled: Number(s), announced: !!v.announced };
   }
-  if (period > 0 && roundNo % period === 0 && !log[roundNo]) {
+  if (period > 0 && (once ? roundNo === period : roundNo % period === 0) && !log[roundNo]) {
     return { scheduled: roundNo, announced: false };
   }
   return null;
 }
 
-export function nextDoubleRound(roundNo, period, doubleLog) {
+export function nextDoubleRound(roundNo, period, doubleLog, once = false) {
   if (!(period > 0)) return null;
+  if (once) {
+    const e = (doubleLog || {})[period];
+    if (e && e.announced) return roundNo <= e.targetRound ? e.targetRound : null;
+    if (e) return Math.max(e.targetRound, roundNo);
+    return roundNo <= period ? period : null;
+  }
   const act = activeDouble(roundNo, period, doubleLog);
   if (act && !act.announced) return roundNo;
   let r = Math.ceil((roundNo + 1) / period) * period;
@@ -217,6 +226,7 @@ export function computeStats(players, rounds) {
     maxPot: 0,
   };
   rounds.forEach((r) => {
+    if (r.type === "refund") return; // 区切りの終わりのポット返金は成績に数えない
     if (r.type === "success" || r.type === "back") st.declared[r.declarer]++;
     if (r.type === "back") {
       st.gotBacked[r.declarer]++;
@@ -264,7 +274,15 @@ export function describeRound(r, players) {
       `${head} ${name(r.declarer)}(${r.declarerHand}) vs ${(r.targets || []).map(name).join("・")}(${r.targetHand})`
     );
   } else if (r.type === "draw") {
-    parts.push(`${head} ${(r.hands || []).map((h, i) => `${name(i)} ${h}`).join("・")}`);
+    parts.push(
+      `${head} ${(r.hands || [])
+        .map((h, i) => (h === "" || h === null || h === undefined ? null : `${name(i)} ${h}`))
+        .filter(Boolean)
+        .join("・")}`
+    );
+  } else if (r.type === "refund") {
+    const back = (r.potOut || []).map((v, i) => (v > 0 ? `${name(i)} ${v}` : null)).filter(Boolean);
+    return { head: `${head}（区切りの終わりに残ったポット）`, moves: back.length ? [`返金：${back.join("・")}`] : [] };
   } else {
     parts.push(head);
   }
@@ -283,8 +301,14 @@ export function buildCsv(players, rounds, joinedAt = []) {
     const s = v === null || v === undefined ? "" : String(v);
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
+  // 複数卓のセッションでは卓・区切りの列を足す
+  const isSession = rounds.some((r) => r.block !== undefined);
+  const sessionCols = isSession
+    ? ["block", "table", "table_round", "time", "declare_line", "deck_count", "table_members"]
+    : [];
   const header = [
     "round",
+    ...sessionCols,
     "type",
     "multiplier",
     "declarer",
@@ -304,9 +328,10 @@ export function buildCsv(players, rounds, joinedAt = []) {
     r.deltas.forEach((d, i) => {
       if (i < totals.length) totals[i] += d;
     });
-    const inGame = (i) => idx + 1 > (joinedAt[i] || 0);
+    const seated = r.seats ? new Set(r.seats) : null;
+    const inGame = (i) => idx + 1 > (joinedAt[i] || 0) && (!seated || seated.has(i));
     const deltas = players.map((_, i) => (inGame(i) ? r.deltas[i] || 0 : ""));
-    const totalsOut = players.map((_, i) => (inGame(i) ? totals[i] : ""));
+    const totalsOut = players.map((_, i) => (idx + 1 > (joinedAt[i] || 0) ? totals[i] : ""));
     const hands = zeros(players.length).map(() => "");
     if (r.type === "draw") (r.hands || []).forEach((h, i) => (hands[i] = h));
     if (r.type === "success" || r.type === "back") {
@@ -317,14 +342,25 @@ export function buildCsv(players, rounds, joinedAt = []) {
     lines.push(
       [
         idx + 1,
+        ...(isSession
+          ? [
+              r.block ?? "",
+              r.table ?? "",
+              r.tableRound ?? "",
+              r.at ? new Date(r.at).toISOString() : "",
+              r.set ? r.set.declareLine ?? "" : "",
+              r.set ? r.set.deckCount ?? "" : "",
+              (r.seats || []).map((i) => players[i]).join("/"),
+            ]
+          : []),
         r.type,
         r.multiplier || 1,
         r.declarer !== undefined && r.declarer !== null ? players[r.declarer] : "",
         r.declarerHand ?? "",
         (r.targets || []).map((t) => players[t]).join("/"),
         r.targetHand ?? "",
-        r.potBefore || 0,
-        r.potAfter || 0,
+        (isSession ? r.tablePotBefore : r.potBefore) || 0,
+        (isSession ? r.tablePotAfter : r.potAfter) || 0,
         moves.join(" / "),
         ...hands,
         ...deltas,
