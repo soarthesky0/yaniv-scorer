@@ -31,7 +31,12 @@ class H(BaseHTTPRequestHandler):
         if len(parts) != 2: self.send_response(404); self.send_header("Content-Length","0"); self.end_headers(); return
         topic, kind = parts
         msgs = store.get(topic, [])
-        latest = msgs[-1:] if q.get("since") == ["latest"] else msgs
+        since = (q.get("since") or ["all"])[0]
+        if since == "latest": latest = msgs[-1:]
+        elif since == "all": latest = msgs
+        else:
+            idx = next((i for i, m in enumerate(msgs) if m["id"] == since), None)
+            latest = msgs[idx + 1:] if idx is not None else msgs
         if kind == "json":
             out = "".join(json.dumps(m) + "\n" for m in latest).encode()
             self.send_response(200); self.cors(); self.send_header("Content-Type","application/x-ndjson")

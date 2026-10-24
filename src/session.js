@@ -65,7 +65,15 @@ export function foldSession(events) {
     const block = S.blocks.find((x) => x.no === b);
     return block ? block.tables.find((x) => x.id === t) : null;
   };
-  for (const e of events || []) {
+  // 複数の端末から届いた出来事を、どの端末でも同じ順番で積み上げる。
+  // 端末の時計が少しずれていても、卓の記録がその区切りより前に並ばないよう、
+  // 先にセッションの骨組み（名簿・設定・区切り）を、そのあとで卓の記録を積む。
+  const seen = new Set();
+  const uniq = (events || []).filter((e) => e && e.id && !seen.has(e.id) && seen.add(e.id));
+  const byTime = (a, b) => (a.at || 0) - (b.at || 0) || String(a.id).localeCompare(String(b.id));
+  const STRUCT = new Set(["init", "roster", "settings", "block", "end", "reopen"]);
+  const ordered = [...uniq.filter((e) => STRUCT.has(e.k)).sort(byTime), ...uniq.filter((e) => !STRUCT.has(e.k)).sort(byTime)];
+  for (const e of ordered) {
     switch (e.k) {
       case "init":
         S.id = e.sid;
@@ -81,9 +89,14 @@ export function foldSession(events) {
       case "settings":
         S.settings = { ...S.settings, ...(e.patch || {}) };
         break;
-      case "block":
-        S.blocks.push({
-          no: S.blocks.length + 1,
+      case "block": {
+        // 同じ番号の区切りが2つの端末から同時に作られたら、あとのほうを使う
+        const no = e.no || S.blocks.length + 1;
+        const existing = S.blocks.findIndex((x) => x.no === no);
+        if (existing >= 0) S.blocks.splice(existing, 1);
+        if (no !== S.blocks.length + 1 && existing < 0) break;
+        S.blocks.splice(no - 1, 0, {
+          no,
           at: e.at,
           tables: (e.tables || []).map((t) => ({
             id: t.id,
@@ -94,6 +107,7 @@ export function foldSession(events) {
           })),
         });
         break;
+      }
       case "tset": {
         const tb = findTable(e.b, e.t);
         if (tb) tb.set = { ...tb.set, ...(e.patch || {}) };
@@ -394,6 +408,7 @@ export function eventsFromGame(game, dev) {
       ...makeEvent(
         "block",
         {
+          no: 1,
           tables: [
             {
               id: "A",

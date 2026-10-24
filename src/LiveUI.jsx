@@ -176,7 +176,7 @@ export function LiveBar({ live, status, onOpen }) {
   );
 }
 
-function QrImage({ text, size = 220 }) {
+export function QrImage({ text, size = 220 }) {
   const [svg, setSvg] = useState("");
   useEffect(() => {
     QRCode.toString(text, { type: "svg", margin: 1, errorCorrectionLevel: "M", color: { dark: "#1a1a1a", light: "#ffffff" } })

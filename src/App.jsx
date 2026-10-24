@@ -30,7 +30,15 @@ import { RulesSheet, RulesFab, recommendFor } from "./RulesPages.jsx";
 import { LiveBar, LiveSheet, useLivePublisher } from "./LiveUI.jsx";
 import { newRoomCode, normalizeCode, isValidCode } from "./live.js";
 import { foldSession, sessionGame, eventsFromGame, makeEvent, newId } from "./session.js";
-import { SessionAssign, SessionPlay, SessionResult } from "./SessionUI.jsx";
+import {
+  SessionAssign,
+  SessionPlay,
+  SessionResult,
+  ConnectSheet,
+  JoiningScreen,
+  WhoAmIScreen,
+} from "./SessionUI.jsx";
+import { useSessionSync, isValidSid, publishNow } from "./sessionSync.js";
 
 // 参加順に割り当てる色。先頭から何色取っても互いの差（色差ΔE）が最大になるように並べてある
 // （2人:124 / 4人:73 / 7人:50 / 12人:33）
@@ -107,6 +115,7 @@ function parseStore(parsed) {
     // 複数卓セッション：{ [id]: { events, view, table } }
     sessions: parsed.sessions && typeof parsed.sessions === "object" ? parsed.sessions : {},
     activeSid: parsed.activeSid || null,
+    devId: typeof parsed.devId === "string" && parsed.devId ? parsed.devId : newId(10),
   };
 }
 
@@ -184,6 +193,62 @@ export default function App() {
   const sess = activeSid ? sessions[activeSid] : null;
   const S = useMemo(() => (sess && sess.events.length ? foldSession(sess.events) : null), [sess && sess.events]);
   const sGame = useMemo(() => (S ? sessionGame(S) : null), [S]);
+  const [devId] = useState(initial.devId);
+  const [connectOpen, setConnectOpen] = useState(false);
+  const [pickMe, setPickMe] = useState(false);
+
+  // ----- 端末間の同期 -----
+  const receiveEvents = (es) => {
+    const sid = activeSid;
+    setSessions((prev) => {
+      const cur = prev[sid];
+      if (!cur) return prev;
+      const known = new Set(cur.events.map((e) => e.id));
+      const add = es.filter((e) => e && e.id && e.k && !known.has(e.id));
+      const ids = new Set(es.map((e) => e && e.id));
+      const outbox = (cur.outbox || []).filter((id) => !ids.has(id));
+      if (!add.length && outbox.length === (cur.outbox || []).length) return prev;
+      const events = add.length ? [...cur.events, ...add] : cur.events;
+      const joining = !!(cur.sync && cur.sync.joining) && !events.some((e) => e.k === "init");
+      return { ...prev, [sid]: { ...cur, events, outbox, sync: { ...(cur.sync || {}), joining } } };
+    });
+  };
+  const markSent = (ids) => {
+    const sid = activeSid;
+    const set = new Set(ids);
+    setSessions((prev) =>
+      prev[sid] ? { ...prev, [sid]: { ...prev[sid], outbox: (prev[sid].outbox || []).filter((id) => !set.has(id)) } } : prev
+    );
+  };
+  const syncOn = !!(sess && sess.sync && sess.sync.on);
+  const isHost = !!(sess && sess.events.some((e) => e.k === "init" && e.dev === devId));
+  const sync = useSessionSync({
+    sid: activeSid,
+    on: syncOn,
+    events: sess ? sess.events : [],
+    pending: sess && sess.outbox ? sess.outbox : [],
+    devId,
+    isHost,
+    joining: !!(sess && sess.sync && sess.sync.joining),
+    onReceive: receiveEvents,
+    onSent: markSent,
+  });
+
+  // 参加用リンク（?join=セッションID）で開かれたとき
+  useEffect(() => {
+    const j = (new URLSearchParams(window.location.search).get("join") || "").toLowerCase();
+    if (!j) return;
+    window.history.replaceState(null, "", "/");
+    if (!isValidSid(j)) return;
+    if (sessions[j]) {
+      setSessions((prev) => ({ ...prev, [j]: { ...prev[j], sync: { ...(prev[j].sync || {}), on: true } } }));
+      setActiveSid(j);
+      return;
+    }
+    if (activeSid && !confirm("進行中のセッションを閉じて、共有されたセッションに参加する？")) return;
+    setSessions((prev) => ({ ...prev, [j]: { events: [], view: "play", outbox: [], sync: { on: true, joining: true, me: null } } }));
+    setActiveSid(j);
+  }, []);
   // 過去に出た名前（多い順、同数なら最近の順）
   const knownNames = useMemo(() => {
     const count = {};
@@ -250,10 +315,10 @@ export default function App() {
     try {
       localStorage.setItem(
         STORAGE_KEY,
-        JSON.stringify({ current, history, trash, lastSettings, lastBackupAt, live, sessions, activeSid })
+        JSON.stringify({ current, history, trash, lastSettings, lastBackupAt, live, sessions, activeSid, devId })
       );
     } catch {}
-  }, [current, history, trash, lastSettings, lastBackupAt, live, sessions, activeSid]);
+  }, [current, history, trash, lastSettings, lastBackupAt, live, sessions, activeSid, devId]);
 
   // ===== ライブ共有 =====
   const { status: liveStatus, sendEnd } = useLivePublisher(live, sGame || current);
@@ -319,7 +384,14 @@ export default function App() {
     setSessions((prev) => {
       const next = { ...prev };
       Object.entries(parsed.sessions || {}).forEach(([id, v]) => {
-        if (!next[id]) next[id] = v;
+        if (!next[id]) {
+          next[id] = v;
+          return;
+        }
+        // 同じセッションなら、まだ持っていない出来事だけを合流させる
+        const known = new Set(next[id].events.map((e) => e.id));
+        const add = (v.events || []).filter((e) => e && e.id && !known.has(e.id));
+        if (add.length) next[id] = { ...next[id], events: [...next[id].events, ...add] };
       });
       return next;
     });
@@ -436,7 +508,15 @@ export default function App() {
   // ----- セッションの操作 -----
   const patchSess = (sid, fn) =>
     setSessions((prev) => (prev[sid] ? { ...prev, [sid]: { ...prev[sid], ...fn(prev[sid]) } } : prev));
-  const emit = (...evs) => patchSess(activeSid, (p) => ({ events: [...p.events, ...evs] }));
+  // 出来事を足す（同期中なら未送信にも積む）
+  const withEvents = (p, evs) => {
+    const es = evs.map((e) => ({ ...e, dev: e.dev || devId }));
+    return {
+      events: [...p.events, ...es],
+      outbox: p.sync && p.sync.on ? [...(p.outbox || []), ...es.map((e) => e.id)] : p.outbox || [],
+    };
+  };
+  const emit = (...evs) => patchSess(activeSid, (p) => withEvents(p, evs));
   const setSessView = (v) => patchSess(activeSid, () => ({ view: v }));
 
   const sessionEntry = (SS, events) => {
@@ -472,7 +552,7 @@ export default function App() {
 
   const switchToMulti = () => {
     if (!confirm("今の試合を「区切り1」として、複数卓のセッションに切り替える？\n点数はそのまま引き継がれます")) return;
-    const { sid, events } = eventsFromGame(current);
+    const { sid, events } = eventsFromGame(current, devId);
     setSessions((prev) => ({ ...prev, [sid]: { events, view: "assign" } }));
     setActiveSid(sid);
     setCurrent({ ...emptyCurrent(lastSettings), numPlayers: current.numPlayers, nameInputs: current.nameInputs });
@@ -481,14 +561,16 @@ export default function App() {
   const startBlock = ({ addRoster, tables, settings }) => {
     const evs = [];
     if (!S) {
-      evs.push(makeEvent("init", { sid: activeSid, roster: addRoster, settings: { ...lastSettings, ...settings } }));
+      evs.push(makeEvent("init", { sid: activeSid, roster: addRoster, settings: { ...lastSettings, ...settings } }, devId));
     } else {
       if (addRoster.length) evs.push(makeEvent("roster", { add: addRoster }));
       const changed = Object.fromEntries(Object.entries(settings).filter(([k, v]) => S.settings[k] !== v));
       if (Object.keys(changed).length) evs.push(makeEvent("settings", { patch: changed }));
     }
-    evs.push(makeEvent("block", { tables }));
-    patchSess(activeSid, (p) => ({ events: [...p.events, ...evs], view: "play", table: tables[0].id }));
+    evs.push(makeEvent("block", { no: S ? S.blocks.length + 1 : 1, tables }));
+    const me = sess.sync && sess.sync.me;
+    const mine = me && tables.find((t) => t.pids.includes(me));
+    patchSess(activeSid, (p) => ({ ...withEvents(p, evs), view: "play", table: (mine || tables[0]).id, tableBlock: S ? S.blocks.length + 1 : 1 }));
   };
 
   const cancelAssign = () => {
@@ -510,9 +592,15 @@ export default function App() {
     setSessView("result");
   };
 
-  const endSession = () => {
+  const endSession = async () => {
     if (!confirm("セッションを終える？\n結果は履歴に保存されます（あとで再開もできます）")) return;
-    const events = [...sess.events, makeEvent("end", {})];
+    const endEv = { ...makeEvent("end", {}), dev: devId };
+    const events = [...sess.events, endEv];
+    if (syncOn) {
+      // ほかの端末にも終了を知らせる（未送信の分もここで送る）
+      const pend = new Set(sess.outbox || []);
+      await publishNow(activeSid, [...sess.events.filter((e) => pend.has(e.id)), endEv], devId).catch(() => {});
+    }
     const SS = foldSession(events);
     upsertSessionHistory(SS, events);
     const sid = activeSid;
@@ -528,10 +616,41 @@ export default function App() {
 
   const resumeSession = (entry) => {
     if (activeSid && !confirm("進行中のセッションを閉じて、このセッションを再開する？")) return;
-    const events = [...(entry.events || []), makeEvent("reopen", {})];
-    setSessions((prev) => ({ ...prev, [entry.id]: { events, view: "play" } }));
+    const events = [...(entry.events || []), { ...makeEvent("reopen", {}), dev: devId }];
+    setSessions((prev) => ({ ...prev, [entry.id]: { events, view: "play", outbox: [] } }));
     setActiveSid(entry.id);
     setView({ type: "main" });
+  };
+
+  const enableSync = () =>
+    patchSess(activeSid, (p) => ({
+      sync: { ...(p.sync || {}), on: true },
+      outbox: p.events.map((e) => e.id),
+    }));
+  const setMe = (id) => {
+    const blk = S && S.blocks.length ? S.blocks[S.blocks.length - 1] : null;
+    const mine = blk && blk.tables.find((t) => t.pids.includes(id));
+    patchSess(activeSid, (p) => ({
+      sync: { ...(p.sync || {}), me: id },
+      ...(mine ? { table: mine.id, tableBlock: blk.no } : {}),
+    }));
+    setPickMe(false);
+  };
+  const leaveSession = () => {
+    const sid = activeSid;
+    setActiveSid(null);
+    setSessions((prev) => {
+      const next = { ...prev };
+      delete next[sid];
+      return next;
+    });
+  };
+  // 別の端末でセッションが終わったとき：履歴に残して閉じる
+  const closeEndedSession = () => {
+    upsertSessionHistory(S, sess.events);
+    const sid = activeSid;
+    leaveSession();
+    setView({ type: "history-detail", id: sid });
   };
 
   if (view.type === "trash") {
@@ -579,6 +698,42 @@ export default function App() {
   }
 
   if (sess) {
+    const syncInfo = syncOn ? sync : null;
+    const connectSheet = connectOpen && (
+      <ConnectSheet
+        sid={activeSid}
+        sync={syncInfo}
+        me={sess.sync && sess.sync.me}
+        roster={S ? S.roster : []}
+        onEnable={() => {
+          enableSync();
+          if (!(sess.sync && sess.sync.me)) setPickMe(true);
+        }}
+        onRetry={sync.retry}
+        onChangeMe={() => {
+          setConnectOpen(false);
+          setPickMe(true);
+        }}
+        onClose={() => setConnectOpen(false)}
+      />
+    );
+    if (syncOn && !S) {
+      return wrap(<JoiningScreen conn={sync.conn} onCancel={leaveSession} />);
+    }
+    if (S && syncOn && (pickMe || !(sess.sync && sess.sync.me))) {
+      return wrap(<WhoAmIScreen S={S} onPick={setMe} />);
+    }
+    if (S && S.ended) {
+      return wrap(
+        <SessionResult
+          S={S}
+          ended
+          onBackToHistory={closeEndedSession}
+          onResume={() => emit(makeEvent("reopen", {}))}
+          liveBar={liveBar}
+        />
+      );
+    }
     if (sess.view === "assign" || !S || !S.blocks.length) {
       return wrap(
         <SessionAssign
@@ -599,17 +754,28 @@ export default function App() {
         <SessionResult S={S} onBack={() => setSessView("play")} onEnd={endSession} liveBar={liveBar} />
       );
     }
+    const blk = S.blocks[S.blocks.length - 1];
+    const me = sess.sync && sess.sync.me;
+    const myTable = me && me !== "viewer" ? (blk.tables.find((t) => t.pids.includes(me)) || {}).id : null;
+    const chosen = sess.tableBlock === blk.no ? sess.table : null;
     return wrap(
-      <SessionPlay
-        S={S}
-        tableId={sess.table}
-        setTableId={(t) => patchSess(activeSid, () => ({ table: t }))}
-        emit={emit}
-        onResult={showSessionResult}
-        onAssignNext={() => setSessView("assign")}
-        onEnd={endSession}
-        liveBar={liveBar}
-      />
+      <>
+        <SessionPlay
+          S={S}
+          tableId={chosen || myTable || sess.table || blk.tables[0].id}
+          setTableId={(t) => patchSess(activeSid, () => ({ table: t, tableBlock: blk.no }))}
+          emit={emit}
+          onResult={showSessionResult}
+          onAssignNext={() => setSessView("assign")}
+          onEnd={endSession}
+          liveBar={liveBar}
+          sync={syncInfo}
+          myTableId={syncOn ? myTable : null}
+          isViewer={syncOn && me === "viewer"}
+          onConnect={() => setConnectOpen(true)}
+        />
+        {connectSheet}
+      </>
     );
   }
 
@@ -1361,7 +1527,12 @@ export function PlayScreen({
       )}
 
       {/* 倍マッチ通知 */}
-      {double && !double.announced && (
+      {double && !double.announced && sessionUi?.readOnly && (
+        <div style={{ ...styles.card, border: "none", boxShadow: "inset 0 0 0 2px #E63946", color: "#E63946", fontWeight: 800 }}>
+          倍マッチのラウンド（この卓の端末でアナウンス待ち）
+        </div>
+      )}
+      {double && !double.announced && !sessionUi?.readOnly && (
         <div style={styles.doubleAlert}>
           <div style={{ fontSize: 22, fontWeight: 900, letterSpacing: "0.02em" }}>倍マッチのラウンド！</div>
           <div style={{ fontSize: 13, opacity: 0.9, marginTop: 4 }}>
@@ -1452,6 +1623,9 @@ export function PlayScreen({
       )}
 
       {/* 入力 */}
+      {sessionUi?.readOnly ? (
+        sessionUi.readOnly
+      ) : (
       <RoundInput
         players={players}
         input={input}
@@ -1462,14 +1636,17 @@ export function PlayScreen({
         double={double}
         onCommit={commit}
       />
+      )}
 
       {rounds.length > 0 && (
         <div style={styles.card}>
           <h2 style={styles.h2}>ラウンド記録 ({rounds.length})</h2>
           <RoundLog rounds={rounds} players={players} />
-          <button onClick={undoLastRound} style={{ ...styles.secondary, marginTop: 10 }}>
-            ← 最終ラウンドを取り消し
-          </button>
+          {!sessionUi?.readOnly && (
+            <button onClick={undoLastRound} style={{ ...styles.secondary, marginTop: 10 }}>
+              ← 最終ラウンドを取り消し
+            </button>
+          )}
         </div>
       )}
 
@@ -3170,6 +3347,24 @@ export const styles = {
     alignItems: "center",
     justifyContent: "center",
     boxShadow: "0 6px 16px rgba(230,57,70,0.4)",
+  },
+  sheetBack: {
+    position: "fixed",
+    inset: 0,
+    background: "rgba(0,0,0,0.35)",
+    zIndex: 50,
+    display: "flex",
+    alignItems: "flex-end",
+    justifyContent: "center",
+  },
+  sheet: {
+    background: "#fff",
+    width: "100%",
+    maxWidth: 520,
+    borderRadius: "14px 14px 0 0",
+    padding: "20px 20px calc(env(safe-area-inset-bottom, 0px) + 24px)",
+    maxHeight: "90vh",
+    overflowY: "auto",
   },
   autoBtn: {
     padding: "10px 4px",

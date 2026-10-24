@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from "react";
 import { Shell, Header, Dot, PlayScreen, ResultView, Segmented, Toggle, NameChips, styles } from "./App.jsx";
 import { recommendFor } from "./RulesPages.jsx";
+import { QrImage } from "./LiveUI.jsx";
+import { joinUrl } from "./sessionSync.js";
 import {
   TABLE_IDS,
   newId,
@@ -357,10 +359,26 @@ function MiniStepper({ label, value, onChange, suffix = "", min = 0 }) {
 }
 
 // ============ 卓の入力画面 ============
-export function SessionPlay({ S, tableId, setTableId, emit, onResult, onAssignNext, onEnd, liveBar, readOnlyTables = [] }) {
+export function SessionPlay({
+  S,
+  tableId,
+  setTableId,
+  emit,
+  onResult,
+  onAssignNext,
+  onEnd,
+  liveBar,
+  sync, // 同期の状態（同期していなければ null）
+  myTableId, // この端末の担当卓
+  isViewer,
+  onConnect,
+}) {
   const block = currentBlock(S);
   const multi = block.multi;
   const table = block.tables.find((t) => t.id === tableId) || block.tables[0];
+  const [unlocked, setUnlocked] = useState([]);
+  const readOnly =
+    !!sync && (isViewer || (myTableId && table.id !== myTableId)) && !unlocked.includes(`${block.no}:${table.id}`);
   const nameOf = useMemo(() => {
     const m = {};
     S.roster.forEach((r) => (m[r.id] = r.name));
@@ -421,10 +439,19 @@ export function SessionPlay({ S, tableId, setTableId, emit, onResult, onAssignNe
 
   const top = (
     <div style={{ display: "grid", gap: 8 }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#888", fontWeight: 700 }}>
-        <span style={{ background: "#1a1a1a", color: "#fff", borderRadius: 10, padding: "2px 9px" }}>複数卓セッション</span>
-        区切り{block.no}
-        {multi && ` · ${S.settings.blockLength || 10}ラウンド`}
+      <div
+        style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12, color: "#888", fontWeight: 700, flexWrap: "wrap" }}
+      >
+        <span style={{ background: "#1a1a1a", color: "#fff", borderRadius: 10, padding: "2px 9px", whiteSpace: "nowrap" }}>
+          複数卓
+        </span>
+        <span style={{ whiteSpace: "nowrap" }}>
+          区切り{block.no}
+          {multi && ` · ${S.settings.blockLength || 10}R`}
+        </span>
+        <span style={{ marginLeft: "auto", whiteSpace: "nowrap" }}>
+          <SyncChip sync={sync} onClick={onConnect} />
+        </span>
       </div>
       {multi && (
         <div style={{ display: "grid", gridTemplateColumns: `repeat(${block.tables.length}, 1fr)`, gap: 6 }}>
@@ -446,7 +473,7 @@ export function SessionPlay({ S, tableId, setTableId, emit, onResult, onAssignNe
               >
                 <div style={{ fontSize: 16, fontWeight: 900 }}>
                   卓{t.id}
-                  {readOnlyTables.includes(t.id) && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.7 }}>閲覧</span>}
+                  {sync && myTableId === t.id && <span style={{ fontSize: 10, marginLeft: 4, opacity: 0.75 }}>担当</span>}
                 </div>
                 <div style={{ fontSize: 11, fontWeight: 700, color: t.status.done ? (on ? "#9be3ae" : GREEN) : on ? "#ccc" : "#888" }}>
                   {t.status.done ? `区切り済 · R${t.status.played}` : `R${t.status.played}／${t.status.doubleRound}`}
@@ -541,6 +568,21 @@ export function SessionPlay({ S, tableId, setTableId, emit, onResult, onAssignNe
     </div>
   );
 
+  const readOnlyCard = readOnly ? (
+    <div style={{ ...styles.card, textAlign: "center", padding: "22px 18px" }}>
+      <div style={{ fontSize: 15, fontWeight: 800 }}>
+        {isViewer ? "見るだけの端末です" : `卓${table.id}は別の端末で入力しています`}
+      </div>
+      <div style={{ fontSize: 12, color: "#999", marginTop: 6 }}>入力されると自動でここに反映されます</div>
+      <button
+        onClick={() => setUnlocked((u) => [...u, `${block.no}:${table.id}`])}
+        style={{ ...styles.secondary, marginTop: 14 }}
+      >
+        この端末でも入力する
+      </button>
+    </div>
+  ) : null;
+
   return (
     <PlayScreen
       key={`${block.no}-${table.id}`}
@@ -556,6 +598,7 @@ export function SessionPlay({ S, tableId, setTableId, emit, onResult, onAssignNe
         resultLabel: "セッションの結果 →",
         settingsExtra,
         headerRight: null,
+        readOnly: readOnlyCard,
       }}
     />
   );
@@ -587,6 +630,178 @@ export function SessionResult({ S, onBack, onEnd, liveBar, ended, onBackToHistor
         onResume={onResume}
         labels={{ back: "← セッションに戻る（続行）", newGame: "セッションを終える", resume: "▶ このセッションを再開する" }}
       />
+    </Shell>
+  );
+}
+
+// ============ 同期の状態 ============
+function SyncChip({ sync, onClick }) {
+  if (!sync) {
+    return (
+      <button onClick={onClick} style={{ ...styles.miniChip, fontSize: 12 }}>
+        ＋ 端末をつなぐ
+      </button>
+    );
+  }
+  const { conn, pendingCount, sendError } = sync;
+  let color = GREEN;
+  let text = "同期中";
+  if (pendingCount > 0 || sendError) {
+    color = AMBER;
+    text = `未送信 ${pendingCount}`;
+  }
+  if (conn === "offline") {
+    color = RED;
+    text = pendingCount ? `圏外・未送信${pendingCount}` : "圏外";
+  } else if (conn === "connecting") {
+    color = AMBER;
+    text = "接続中";
+  }
+  return (
+    <button onClick={onClick} style={{ ...styles.miniChip, fontSize: 12, color, whiteSpace: "nowrap" }}>
+      <span style={{ width: 8, height: 8, borderRadius: 4, background: color, display: "inline-block", flexShrink: 0 }} />
+      {text}
+    </button>
+  );
+}
+
+export function ConnectSheet({ sid, sync, onEnable, onClose, onRetry, me, roster, onChangeMe }) {
+  const url = joinUrl(sid);
+  const [copied, setCopied] = useState(false);
+  const share = async () => {
+    try {
+      if (navigator.share) {
+        await navigator.share({ title: "ヤニブ 複数卓セッションに参加", url });
+        return;
+      }
+    } catch (e) {
+      if (e && e.name === "AbortError") return;
+    }
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      prompt("このリンクをコピーしてください", url);
+    }
+  };
+  const meName = me === "viewer" ? "見るだけ" : (roster.find((r) => r.id === me) || {}).name;
+  return (
+    <div onClick={onClose} style={styles.sheetBack}>
+      <div onClick={(e) => e.stopPropagation()} style={styles.sheet}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <h2 style={{ ...styles.h2, margin: 0 }}>端末をつなぐ</h2>
+          <button onClick={onClose} style={styles.headerBtn}>
+            閉じる
+          </button>
+        </div>
+        {!sync ? (
+          <div style={{ display: "grid", gap: 12 }}>
+            <p style={{ fontSize: 14, lineHeight: 1.7, margin: 0 }}>
+              卓ごとに別のスマホで入力できるようになります。どの端末で入力しても、全員の累計にすぐ反映されます。
+            </p>
+            <ul style={{ fontSize: 12, color: "#666", lineHeight: 1.7, margin: 0, paddingLeft: 18 }}>
+              <li>中継には登録不要の公開サービス（ntfy.sh）を使います。ログインは不要です</li>
+              <li>参加用のリンクを知っている人なら誰でも参加・入力できます</li>
+              <li>電波がないときに入力した分は端末に溜め、つながったら送ります</li>
+            </ul>
+            <button onClick={onEnable} style={styles.primary}>
+              つなぐ（参加用のQRを出す）
+            </button>
+          </div>
+        ) : (
+          <div style={{ display: "grid", gap: 14 }}>
+            <QrImage text={url} />
+            <div style={{ fontSize: 13, lineHeight: 1.7, color: "#444" }}>
+              卓の端末でこのQRを読み取って開き、自分の名前を選ぶと、その人がいる卓の入力画面になります。
+            </div>
+            <button onClick={share} style={styles.primary}>
+              {copied ? "コピーしました" : "参加用リンクを送る"}
+            </button>
+            <div style={{ display: "grid", gap: 6, background: "#f7f5ef", borderRadius: 8, padding: "10px 12px", fontSize: 13 }}>
+              <div>
+                接続：
+                <strong>
+                  {sync.conn === "live" ? "つながっています" : sync.conn === "offline" ? "オフライン（自動で再接続します）" : "接続中…"}
+                </strong>
+              </div>
+              <div>
+                未送信：<strong>{sync.pendingCount}件</strong>
+                {sync.pendingCount > 0 && (
+                  <button onClick={onRetry} style={{ ...styles.linkBtn, marginLeft: 10, fontSize: 13 }}>
+                    今すぐ送る
+                  </button>
+                )}
+              </div>
+              <div>
+                この端末：<strong>{meName || "未選択"}</strong>
+                <button onClick={onChangeMe} style={{ ...styles.linkBtn, marginLeft: 10, fontSize: 13 }}>
+                  変更
+                </button>
+              </div>
+            </div>
+            <div style={{ fontSize: 11, color: "#aaa", lineHeight: 1.6 }}>
+              つながらないときは、履歴画面のバックアップで書き出したファイルを別の端末で読み込むと、記録をまとめられます。
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+export function JoiningScreen({ conn, onCancel }) {
+  return (
+    <Shell>
+      <Header
+        title="参加"
+        right={
+          <button onClick={onCancel} style={styles.headerBtn}>
+            やめる
+          </button>
+        }
+      />
+      <div style={{ ...styles.card, textAlign: "center", padding: "40px 20px" }}>
+        <div style={{ fontSize: 17, fontWeight: 800 }}>
+          {conn === "offline" ? "つながりません" : "セッションのデータを受け取っています…"}
+        </div>
+        <div style={{ fontSize: 12, color: "#999", marginTop: 8, lineHeight: 1.7 }}>
+          {conn === "offline"
+            ? "電波を確認してください。つながれば自動で続きます。"
+            : "セッションを作った端末が開いていれば、まもなく表示されます。"}
+        </div>
+      </div>
+    </Shell>
+  );
+}
+
+export function WhoAmIScreen({ S, onPick }) {
+  const block = currentBlock(S);
+  const where = (id) => (block ? block.tables.find((t) => t.pids.includes(id)) : null);
+  return (
+    <Shell>
+      <Header title="あなたは？" />
+      <p style={{ ...styles.sub, textTransform: "none", letterSpacing: "0.04em" }}>
+        この端末を使う人を選んでください。その人がいる卓の入力画面になります。
+      </p>
+      <div style={{ display: "grid", gap: 8 }}>
+        {S.roster.map((r) => {
+          const t = where(r.id);
+          return (
+            <button
+              key={r.id}
+              onClick={() => onPick(r.id)}
+              style={{ ...styles.homeLink, flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}
+            >
+              <span style={{ fontSize: 17, fontWeight: 800 }}>{r.name}</span>
+              <span style={{ fontSize: 12, color: "#888" }}>{t ? (block.multi ? `卓${t.id}` : "") : "休み"}</span>
+            </button>
+          );
+        })}
+        <button onClick={() => onPick("viewer")} style={{ ...styles.secondary, marginTop: 6 }}>
+          見るだけ（入力しない）
+        </button>
+      </div>
     </Shell>
   );
 }
