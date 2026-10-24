@@ -1314,6 +1314,9 @@ function RoundInput({ players, input, setInput, result, pot, settings, double, o
     { value: "manual", label: "手入力" },
   ];
   const isDeclare = input.type === "success" || input.type === "back";
+  // 倍マッチ中（アナウンス済み）なのに倍率が×1のまま
+  const inDouble = !!(double && double.announced);
+  const needMult = inDouble && input.type && input.type !== "manual" && input.multiplier === 1;
 
   const selectType = (t) => {
     // 種類を変えたときは選択内容を保ったまま切り替え（倍率は維持）
@@ -1321,7 +1324,29 @@ function RoundInput({ players, input, setInput, result, pot, settings, double, o
   };
 
   return (
-    <div style={styles.card}>
+    <div
+      style={{
+        ...styles.card,
+        ...(inDouble ? { border: "none", boxShadow: "inset 0 0 0 3px #E63946", paddingTop: 0, overflow: "hidden" } : {}),
+      }}
+    >
+      {inDouble && (
+        <div
+          style={{
+            margin: "0 -18px 16px",
+            padding: "10px 18px",
+            background: "#E63946",
+            color: "#fff",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+          }}
+        >
+          <span style={{ fontSize: 17, fontWeight: 900 }}>倍マッチ中</span>
+          <span style={{ fontSize: 12, fontWeight: 700, opacity: 0.95 }}>倍率（×2／×3）を選んでから確定</span>
+        </div>
+      )}
       <h2 style={styles.h2}>結果の入力</h2>
 
       <div style={{ display: "grid", gridTemplateColumns: `repeat(${typeOptions.length}, 1fr)`, gap: 6 }}>
@@ -1341,19 +1366,30 @@ function RoundInput({ players, input, setInput, result, pot, settings, double, o
       </div>
 
       {input.type && input.type !== "manual" && (
-        <div style={{ marginTop: 16 }}>
-          <label style={styles.label}>倍率</label>
-          <Segmented
-            value={input.multiplier}
-            onChange={(v) => set({ multiplier: v })}
-            options={[
-              { value: 1, label: "×1" },
-              { value: 2, label: "×2", activeColor: "#E63946" },
-              { value: 3, label: "×3", activeColor: "#E63946" },
-            ]}
-          />
-          {double && double.announced && input.multiplier === 1 && (
-            <div style={{ fontSize: 12, color: "#E63946", marginTop: 6 }}>倍マッチ中です。倍率を確認してください</div>
+        <div
+          style={{
+            marginTop: 16,
+            ...(needMult
+              ? { background: "#fff1f2", boxShadow: "inset 0 0 0 2px #E63946", borderRadius: 10, padding: "12px 12px 14px" }
+              : {}),
+          }}
+        >
+          <label style={{ ...styles.label, ...(needMult ? { color: "#E63946" } : {}) }}>倍率</label>
+          <div className={needMult ? "mult-attn" : undefined}>
+            <Segmented
+              value={input.multiplier}
+              onChange={(v) => set({ multiplier: v })}
+              options={[
+                { value: 1, label: "×1" },
+                { value: 2, label: "×2", activeColor: "#E63946" },
+                { value: 3, label: "×3", activeColor: "#E63946" },
+              ]}
+            />
+          </div>
+          {needMult && (
+            <div style={{ fontSize: 14, fontWeight: 800, color: "#E63946", marginTop: 8 }}>
+              倍率が×1のままです。倍マッチなら×2か×3を選んでください
+            </div>
           )}
         </div>
       )}
@@ -1531,9 +1567,19 @@ function RoundInput({ players, input, setInput, result, pot, settings, double, o
           <button
             onClick={onCommit}
             disabled={!result || !!result.error}
-            style={{ ...styles.primary, marginTop: 12, opacity: !result || result.error ? 0.35 : 1 }}
+            style={{
+              ...styles.primary,
+              marginTop: 12,
+              opacity: !result || result.error ? 0.35 : 1,
+              ...(needMult ? { background: "#fff", color: "#E63946", boxShadow: "inset 0 0 0 2px #E63946" } : {}),
+              ...(inDouble && input.multiplier > 1 && input.type !== "manual" ? { background: "#E63946" } : {}),
+            }}
           >
-            この内容で確定
+            {needMult
+              ? "倍率×1のまま確定する"
+              : input.type !== "manual" && input.multiplier > 1
+                ? `×${input.multiplier}で確定`
+                : "この内容で確定"}
           </button>
         </div>
       )}
@@ -1550,8 +1596,23 @@ function Preview({ players, result, pot, multiplier, type }) {
   const changed = result.deltas.map((d, i) => ({ d, i })).filter((x) => x.d !== 0);
   return (
     <div style={{ background: "#f7f5ef", borderRadius: 8, padding: 14, border: "1px dashed #d4d0c4" }}>
-      <div style={{ ...styles.miniLabel, marginBottom: 8 }}>
-        確認{type !== "manual" && multiplier > 1 ? `　倍率 ×${multiplier}` : ""}
+      <div style={{ ...styles.miniLabel, marginBottom: 8, display: "flex", alignItems: "center", gap: 8 }}>
+        確認
+        {type !== "manual" && multiplier > 1 && (
+          <span
+            style={{
+              background: "#E63946",
+              color: "#fff",
+              borderRadius: 10,
+              padding: "2px 10px",
+              fontSize: 13,
+              fontWeight: 900,
+              letterSpacing: 0,
+            }}
+          >
+            倍率 ×{multiplier}
+          </span>
+        )}
       </div>
       {result.transfers.length > 0 && (
         <div style={{ display: "grid", gap: 4, marginBottom: 8 }}>
