@@ -329,12 +329,20 @@ export function sessionGame(S, filter = {}) {
     if (filter.block || filter.table) return 0;
     return rounds.filter((r) => r.block < fb).length;
   });
-  return {
+  // 区切りの境目（グラフに線を引く位置）
+  const boundaries = [];
+  if (!filter.block && !filter.table) {
+    rounds.forEach((r, i) => {
+      if (i > 0 && r.block !== rounds[i - 1].block) boundaries.push({ x: i, label: `区切り${r.block}` });
+    });
+  }
+  const base = {
     kind: "session",
     id: S.id,
     players,
     rounds,
     joinedAt,
+    boundaries,
     settings: { ...S.settings },
     startedAt: S.startedAt ? new Date(S.startedAt).toISOString() : null,
     finishedAt: S.endedAt ? new Date(S.endedAt).toISOString() : null,
@@ -342,6 +350,36 @@ export function sessionGame(S, filter = {}) {
     doubleLog: {},
     blocks: S.blocks.length,
     tables: Math.max(0, ...S.blocks.map((b) => b.tables.length)),
+  };
+  return filter.block || filter.table ? onlySeated(base) : base;
+}
+
+// 区切り・卓で絞ったときは、その範囲で卓にいた人だけを残す
+function onlySeated(g) {
+  const keep = [];
+  const seen = new Set();
+  g.rounds.forEach((r) => (r.seats || []).forEach((i) => seen.add(i)));
+  g.players.forEach((_, i) => {
+    if (seen.has(i)) keep.push(i);
+  });
+  const map = {};
+  keep.forEach((old, ni) => (map[old] = ni));
+  const pick = (a, fill = 0) => (a ? keep.map((i) => (a[i] === undefined ? fill : a[i])) : a);
+  return {
+    ...g,
+    players: keep.map((i) => g.players[i]),
+    joinedAt: keep.map(() => 0),
+    rounds: g.rounds.map((r) => ({
+      ...r,
+      declarer: r.declarer !== undefined && r.declarer !== null ? map[r.declarer] : r.declarer,
+      targets: (r.targets || []).map((t) => map[t]),
+      hands: r.hands ? pick(r.hands, "") : r.hands,
+      deltas: pick(r.deltas),
+      potIn: pick(r.potIn),
+      potOut: pick(r.potOut),
+      transfers: (r.transfers || []).map((x) => ({ ...x, from: map[x.from], to: map[x.to] })),
+      seats: (r.seats || []).map((i) => map[i]),
+    })),
   };
 }
 

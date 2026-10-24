@@ -604,9 +604,22 @@ export function SessionPlay({
   );
 }
 
-// ============ セッションの結果 ============
+// ============ セッションの結果（全体／区切りごと／卓ごと） ============
 export function SessionResult({ S, onBack, onEnd, liveBar, ended, onBackToHistory, onResume }) {
-  const game = useMemo(() => sessionGame(S), [S]);
+  const [scope, setScope] = useState({ block: null, table: null });
+  const game = useMemo(
+    () => sessionGame(S, scope.block ? { block: scope.block, ...(scope.table ? { table: scope.table } : {}) } : {}),
+    [S, scope]
+  );
+  const block = scope.block ? S.blocks.find((b) => b.no === scope.block) : null;
+  const played = game.rounds.filter((r) => r.type !== "refund").length;
+  const tab = (on) => ({
+    ...styles.chip,
+    padding: "7px 12px",
+    fontSize: 13,
+    whiteSpace: "nowrap",
+    ...(on ? styles.chipActive : {}),
+  });
   return (
     <Shell>
       <Header
@@ -618,16 +631,52 @@ export function SessionResult({ S, onBack, onEnd, liveBar, ended, onBackToHistor
         }
       />
       <p style={{ ...styles.sub, textTransform: "none", letterSpacing: "0.04em" }}>
-        複数卓セッション · {S.blocks.length}区切り · {S.roster.length}人 · {game.rounds.filter((r) => r.type !== "refund").length}ラウンド
+        複数卓セッション · {S.blocks.length}区切り · {S.roster.length}人
       </p>
       {liveBar}
+
+      {S.blocks.length > 1 || (S.blocks[0] && S.blocks[0].multi) ? (
+        <div style={{ display: "grid", gap: 8 }}>
+          <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 2 }}>
+            <button onClick={() => setScope({ block: null, table: null })} style={tab(!scope.block)}>
+              全体
+            </button>
+            {S.blocks.map((b) => (
+              <button key={b.no} onClick={() => setScope({ block: b.no, table: null })} style={tab(scope.block === b.no)}>
+                区切り{b.no}
+              </button>
+            ))}
+          </div>
+          {block && block.multi && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button onClick={() => setScope({ block: block.no, table: null })} style={tab(!scope.table)}>
+                全卓
+              </button>
+              {block.tables.map((t) => (
+                <button key={t.id} onClick={() => setScope({ block: block.no, table: t.id })} style={tab(scope.table === t.id)}>
+                  卓{t.id}
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={{ fontSize: 12, color: "#888" }}>
+            {scope.block
+              ? `区切り${scope.block}${scope.table ? `・卓${scope.table}` : ""}の点数だけを集計（${played}ラウンド）。精算はセッション全体の「全体」で確認してください`
+              : `セッション全体（${played}ラウンド）。グラフの点線が区切りの境目`}
+          </div>
+        </div>
+      ) : null}
+
       <ResultView
+        key={`${scope.block || 0}-${scope.table || ""}`}
         game={game}
         mode={ended ? "history" : "current"}
         onBackToPlay={onBack}
         onNewGame={onEnd}
         onBack={onBackToHistory}
         onResume={onResume}
+        partial={!!scope.block}
+        hideActions={!!scope.block}
         labels={{ back: "← セッションに戻る（続行）", newGame: "セッションを終える", resume: "▶ このセッションを再開する" }}
       />
     </Shell>

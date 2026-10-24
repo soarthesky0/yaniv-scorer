@@ -8,6 +8,7 @@ import {
   Tooltip,
   ResponsiveContainer,
   ReferenceArea,
+  ReferenceLine,
 } from "recharts";
 import { toBlob } from "html-to-image";
 import {
@@ -2104,7 +2105,7 @@ const MARKS = [
   { key: "mult", label: "倍率", color: "#F4A261", opacity: 0.22, test: (r) => (r.multiplier || 1) > 1 },
 ];
 
-export function ScoreChart({ players, data, rounds = [], showPot, height, xDomain, yDomain, yTicks }) {
+export function ScoreChart({ players, data, rounds = [], showPot, height, xDomain, yDomain, yTicks, boundaries = [] }) {
   // 幅に合わせて高さも伸ばす（スマホは指定の高さ、iPadなど横幅が広いときは幅の約4割）
   const boxRef = useRef(null);
   const [boxWidth, setBoxWidth] = useState(0);
@@ -2213,6 +2214,18 @@ export function ScoreChart({ players, data, rounds = [], showPot, height, xDomai
               )
             )}
             <XAxis dataKey="round" stroke="#666" fontSize={12} type="number" domain={domain} allowDecimals={false} />
+            {boundaries
+              .filter((b) => b.x <= lastRound)
+              .map((b) => (
+                <ReferenceLine
+                  key={`b${b.x}`}
+                  x={b.x}
+                  stroke="#1a1a1a"
+                  strokeOpacity={0.55}
+                  strokeDasharray="2 3"
+                  label={{ value: b.label, position: "insideTopRight", fontSize: 10, fill: "#666" }}
+                />
+              ))}
             <YAxis
               stroke="#666"
               fontSize={12}
@@ -2394,7 +2407,17 @@ async function exportCsv(game) {
 }
 
 // ============ Result（現在ゲーム・履歴詳細の共通部分） ============
-export function ResultView({ game, mode = "current", onBackToPlay, onNewGame, onBack, onResume, labels = {} }) {
+export function ResultView({
+  game,
+  mode = "current",
+  onBackToPlay,
+  onNewGame,
+  onBack,
+  onResume,
+  labels = {},
+  partial = false, // 区切り・卓だけの集計（精算は出さない）
+  hideActions = false,
+}) {
   const { players, rounds, settings } = game;
   const joinedAt = game.joinedAt || [];
   const cumulative = useMemo(() => computeCumulative(players, rounds, joinedAt), [players, rounds, joinedAt]);
@@ -2537,6 +2560,7 @@ export function ResultView({ game, mode = "current", onBackToPlay, onNewGame, on
           )}
         </div>
 
+        {!partial && (
         <div style={styles.card}>
           <h2 style={styles.h2}>精算 — 全員を0にする</h2>
           {settlement.length === 0 ? (
@@ -2573,6 +2597,7 @@ export function ResultView({ game, mode = "current", onBackToPlay, onNewGame, on
             {pot > 0 ? `。ポット残高${pot}点分はマイナス側の支払い残りになります` : ""}
           </p>
         </div>
+        )}
 
         <div style={styles.card} className="bleed">
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
@@ -2590,6 +2615,7 @@ export function ResultView({ game, mode = "current", onBackToPlay, onNewGame, on
             xDomain={[0, cumulative.series.length - 1]}
             yDomain={[yMin, yMax]}
             yTicks={yTicks}
+            boundaries={game.boundaries || []}
           />
         </div>
 
@@ -2627,7 +2653,7 @@ export function ResultView({ game, mode = "current", onBackToPlay, onNewGame, on
         <button onClick={() => exportCsv({ ...game, joinedAt })} style={styles.secondary}>
           ラウンド記録をCSVで出力
         </button>
-        {mode === "current" && (
+        {mode === "current" && !hideActions && (
           <>
             <button onClick={onBackToPlay} style={styles.secondary}>
               {labels.back || "← 試合に戻る（続行）"}
@@ -2637,7 +2663,7 @@ export function ResultView({ game, mode = "current", onBackToPlay, onNewGame, on
             </button>
           </>
         )}
-        {mode === "history" && (
+        {mode === "history" && !hideActions && (
           <>
             <button onClick={onResume} style={styles.secondary}>
               {labels.resume || "▶ この試合を再開する"}
@@ -3158,6 +3184,11 @@ function TrashScreen({ trash, onBack, onRestore, onPurge }) {
 }
 
 function HistoryDetailScreen({ entry, onBack, onResume }) {
+  // 複数卓セッションは、区切り・卓ごとのタブが付いた結果画面で見る
+  const S = useMemo(() => (entry.kind === "session" && entry.events ? foldSession(entry.events) : null), [entry]);
+  if (S && S.blocks.length) {
+    return <SessionResult S={S} ended onBackToHistory={onBack} onResume={onResume} />;
+  }
   return (
     <Shell>
       <Header
